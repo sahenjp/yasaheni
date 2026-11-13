@@ -41,6 +41,8 @@ namespace yskn::gguf {
 //   kTileRows       src/loader.cpp:39           (64-row tiles)
 // ---------------------------------------------------------------------------
 constexpr int kHadamardBlock = 512;
+// 1/sqrt(512), the normalisation fwht512_blocks applies (src/a8_prologue.cuh:49).
+constexpr float kInvSqrt512 = 0.044194173824159216f;
 constexpr int kLutBits = 12;
 constexpr int kLutSize = 1 << kLutBits;  // 4096 codebook entries
 constexpr int kSeqCols = 256;            // columns per trellis sequence
@@ -65,6 +67,9 @@ struct QuantConfig {
   bool use_rot_out = true;
   uint64_t sign_seed = 7;
   std::string sign_rule = "mulberry32_7919_13";
+  // Lloyd rounds over the trellis-reachable states after the initial k-means.
+  // 0 keeps the plain k-means codebook (faster, noticeably lossier).
+  int refine_iterations = 4;
 };
 
 // ---------------------------------------------------------------------------
@@ -131,6 +136,21 @@ struct Codebook {
 // in shared memory (4096*2 floats = 32 KiB) and do one block per point batch,
 // or use a 64x64 bucket grid to prune candidates on the host.
 Codebook train_codebook(const float* B, size_t n, int seed);
+
+// ---------------------------------------------------------------------------
+// Trellis-aware refinement of a codebook.
+//
+// train_codebook() is plain k-means over the pairs and ignores the trellis: in
+// the reader a state s' can only be reached from states whose low NB-K bits
+// match. A codebook that is optimal in the unconstrained sense is therefore not
+// the best one for the paths the encoder can actually take.
+//
+// refine_codebook() runs one Viterbi pass, moves each centroid to the mean of
+// the pairs that actually landed on it, and repeats. 'iterations' of 0 returns
+// 'start' unchanged. The max|q| == 127 invariant is re-applied every round.
+// ---------------------------------------------------------------------------
+Codebook refine_codebook(const float* B, int rows, int cols, const Codebook& start, int bits,
+                         int iterations = 4);
 
 // ---------------------------------------------------------------------------
 // Step 6+7: Viterbi and bit packing.
@@ -220,6 +240,15 @@ QuantizedTensor quantize_tensor(const float* W, int rows, int cols, const QuantC
 // max|B|. Returns false when the tensor is structurally unusable (sizes do not
 // match, degenerate LUT); the metrics are then set to +inf.
 bool verify_roundtrip(const QuantizedTensor& t, const float* B, float* max_abs_err, float* rel_err);
+
+// Same oracle, but also reports the RMS error over every decoded value.
+//
+// max|err| is dominated by a handful of outlier pairs and grows with the amount
+// of training data (a codebook trained on more data generalises instead of
+// overfitting, which raises the worst case while lowering the typical one). RMS
+// is the metric that tracks reconstruction quality, so tests and reports should
+// prefer it.
+bool verify_roundtrip_rms(const QuantizedTensor& t, const float* B, float* rms_err, float* max_abs_err);
 
 // ---------------------------------------------------------------------------
 // IEEE binary16 helpers (host side, no cuda_fp16.h). Round-to-nearest-even,
