@@ -1,55 +1,55 @@
 # yasakani-sahen
 
-A Linux port of the [YASAKANI](https://github.com/yasakani-dev/yasakani) local LLM engine, with two goals:
+A Linux port of the [YASAKANI](https://github.com/yasakani-dev/yasakani) local LLM engine. Upstream runs on Windows with one RTX 5090 and reads only its own `YSKN` container. This fork runs on Linux across several GPU generations and reads GGUF directly.
 
-1. **Run on more than one GPU.** Upstream targets Windows and a single RTX 5090 (`sm_120`). This port builds for `sm_80 / 86 / 89 / 90 / 120` from one source tree and runs on Linux.
-2. **Read GGUF directly.** Upstream only reads its own `YSKN` container, and the converter that writes it is not published. This port adds a GGUF v2/v3 reader so stock GGUF files can be opened without a conversion step.
-
-Apache License 2.0, same as upstream. The engine kernels are the work of the YASAKANI authors; the port is in the build system, the platform layer, and the GGUF path.
+Apache License 2.0, same as upstream. The kernels are the work of the YASAKANI authors; what changed here is the build system, the platform layer, and the GGUF input path.
 
 ## Status
 
 | Piece | State |
 |---|---|
-| Linux build of the engine (`libyskn.so`) | works; `sm_80/86/89/90/120` in one binary |
+| Linux build (`libyskn.so`) | works; `sm_80/86/89/90/120` in one binary |
 | Multi-architecture kernels | works; PDL and bulk prefetch degrade cleanly below `sm_90` |
-| GGUF v2/v3 reader | works; 16 ggml types dequantized, verified bit-identical against llama.cpp |
-| GGUF model adapter (config, name mapping, validation) | works; 377 checks |
-| GGUF to engine tensor quantization | works; Viterbi verified optimal, 84 checks |
-| Running a GGUF model end to end | works; a GGUF opens, prefills, decodes and returns logits through the legacy Engine |
+| GGUF v2/v3 reader | works; 16 ggml types, bit-identical to llama.cpp's dequantizers |
+| GGUF model adapter | works; config, name mapping, validation |
+| GGUF to engine quantization | works; Viterbi verified optimal against brute force |
+| Running a GGUF model | works; open, prefill, decode and logits on a real GPU |
+
+1317 checks across 6 suites, no GPU needed. See [Tests](#tests).
 
 ## Build
 
-Requires CMake 3.24+, Ninja, a CUDA 12.8+ toolkit (13.x recommended), and GCC or Clang.
+CMake 3.24+, Ninja, CUDA 12.8+ (13.x recommended), GCC or Clang.
 
 ```bash
+scripts/check-env.sh                         # driver, nvcc, GPU, python
 scripts/build-linux.sh                       # sm_120;86;80
 CUDA_ARCH="80;86;89;90;120" scripts/build-linux.sh
-CUDA_ARCH=native scripts/build-linux.sh      # whatever GPU this machine has
+CUDA_ARCH=native scripts/build-linux.sh
 ```
 
 The result is `build-linux/libyskn.so`. The CUDA runtime is linked statically, so the library needs only the NVIDIA driver at run time.
 
-Check the machine first with `scripts/check-env.sh`.
+### Why the architectures matter
 
-## Why the architectures matter
-
-The upstream kernels are written for `sm_120` and use two instructions that do not exist below `sm_90`:
+The upstream kernels target `sm_120` and use two instructions that do not exist below `sm_90`:
 
 * `griddepcontrol.wait` / `.launch_dependents` (Programmatic Dependent Launch)
 * `cp.async.bulk.prefetch.L2.global` (bulk L2 prefetch)
 
-Both are now behind `__CUDA_ARCH__` guards (`src/pdl.cuh`), and the host-side launch path asks the device for its compute capability before enabling PDL, so the same binary runs on Ampere, Ada, Hopper and Blackwell.
+Both are behind `__CUDA_ARCH__` guards in `src/pdl.cuh`, and `pdl_enabled()` asks the device for its compute capability before requesting the PDL launch attribute. One binary therefore runs on Ampere, Ada, Hopper and Blackwell.
 
 ## GGUF
 
 `src/gguf/` reads GGUF v2/v3: header, every metadata value type including nested arrays, tensor infos, alignment, and an `mmap`'d data section. Dequantization covers F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K and IQ4_NL.
 
-The dequantizers were checked three ways: against `dequantize_row_*` lifted from llama.cpp's `ggml-quants.c` (bit-identical on all 12 quantized types), against the official `gguf` Python package on 19 real GGUF files (including a full 151,936-token Qwen2 vocabulary), and by mutation and fuzz testing.
+The dequantizers were checked three ways: against `dequantize_row_*` lifted from llama.cpp's `ggml-quants.c` (bit-identical on all 12 quantized types), against the official `gguf` Python package on 19 real GGUF files, and by mutation and fuzz testing.
 
-A GGUF file is loaded by the legacy `Engine` path, which reads every dimension from the file metadata, so it is shape-parametric. The 27B `Engine35` path still needs its own conversion. What the gate checks is what the templated kernels can actually run: `head_dim` must be 128 or 256 (the attention kernels are instantiated per head width, `src/attention_gqa.cu:171-172`) and `ffn` must be a multiple of 512. Anything else is refused with a message naming the field and the value.
+### What the gate accepts
 
-`docs/GGUF_DESIGN.md` documents the `YSKN` container the engine was built around, and what a converter from GGUF to that format would need. `docs/GGUF_NOTES.md` records the measured behaviour of the quantization bridge: the trellis bound, the codebook refinement gains, and the bugs the round-trip oracle caught.
+A GGUF is loaded by the legacy `Engine`, which reads `hidden`, `ffn`, `kv_heads` and `vocab` from the file. The attention shape is not parametric: `src/post_kernels.cu:47` writes `q16` with a literal stride of 28 heads x 128 slots and `src/attention_kv4q.cu:81` reads it back the same way. So the gate requires `heads == 28`, `head_dim == 128`, and `ffn` a multiple of 512. Anything else is refused with a message naming the field, the value, and the kernel line.
+
+A `head_dim 256` model was measured loading successfully and then returning NaN logits, which is why the gate refuses it rather than trusting the templated generic path that is off by default.
 
 ## Tests
 
@@ -60,8 +60,21 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-No GPU is needed for these; they are host-side.
+| Suite | Checks | What it covers |
+|---|---|---|
+| `gguf_reader` | 304 | parsing, dequantization, malformed input |
+| `gguf_model_adapter` | 377 | config, name mapping, validation |
+| `gguf_engine_wiring` | 147 | file-kind detection, the support gate, the probe |
+| `gguf_quant` | 84 | rotation, codebook, Viterbi optimality, round trip |
+| `gguf_container` | 394 | the in-memory image the loader reads |
+| `gguf_load_dispatch` | 11 | YSKN and GGUF routing through `Model::load` |
+
+## Documentation
+
+* [`docs/GGUF_DESIGN.md`](docs/GGUF_DESIGN.md): the `YSKN` container format, derived from the reader, and what a converter would need.
+* [`docs/GGUF_NOTES.md`](docs/GGUF_NOTES.md): measured behaviour of the quantization bridge, including the trellis bound, the refinement gains, and the bugs the round-trip oracle caught.
+* [`bench/README.md`](bench/README.md): the benchmark harness and how the speed number is defined.
 
 ## Upstream
 
-The original engine, its published measurements and its model files are at [yasakani-dev/yasakani](https://github.com/yasakani-dev/yasakani). This port does not change what the kernels compute; it changes where they can run and what they can read.
+The original engine, its published measurements and its model files are at [yasakani-dev/yasakani](https://github.com/yasakani-dev/yasakani). This port does not change what the kernels compute; it changes where they run and what they can read.

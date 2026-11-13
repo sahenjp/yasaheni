@@ -158,8 +158,8 @@ so: `— (2 excl.)` means every run of that task was flagged and nothing is left
 
 Before printing anything, `compare.py` checks each file against `schema.json` by hand (no `jsonschema` dependency) and then checks the set:
 
-* **Different `max_tokens`** — refused, with the value of every file listed.
-* **Different prompt sets** — refused, naming the tasks that only one file has and the tasks whose content hash differs.
+* **Different `max_tokens`**: refused, with the value of every file listed.
+* **Different prompt sets**: refused, naming the tasks that only one file has and the tasks whose content hash differs.
 
 Both are refusals rather than warnings because they are the two ways these tables lie: a 4,096-token run and a 512-token run are not the
 same test, and two "chat" columns built from different prompts are not the same column. Exit status is `2` on any refusal, `0` on success,
@@ -191,7 +191,7 @@ so a script can check it.
 ```
 
 `prompts` is the fingerprint of the prompt set: task name to the SHA-256 of the file. That is what `compare.py` compares when it decides
-whether two files ran the same test — not the task names, which can be reused for different content. `gpu` is whatever `nvidia-smi` said
+whether two files ran the same test, not the task names, which can be reused for different content. `gpu` is whatever `nvidia-smi` said
 when the run started; when it is not available the fields are empty and `note` says why, and the run goes ahead, because a missing
 `nvidia-smi` is not a reason to lose a measurement.
 
@@ -201,7 +201,7 @@ Nothing in the harness is specific to this engine. To add one:
 
 1. Start it so that it serves an OpenAI-compatible chat API with streaming, and note the base URL. vLLM and SGLang: their own `serve`
    command, then `http://127.0.0.1:PORT/v1`. llama.cpp: `llama-server -m model.gguf --port PORT`, then `http://127.0.0.1:PORT/v1`.
-2. Run the harness with the same settings you use for every other engine — the same `--tasks`, the same `--runs`, the same `--max-tokens`,
+2. Run the harness with the same settings you use for every other engine: the same `--tasks`, the same `--runs`, the same `--max-tokens`,
    the same sampling. Only `--engine`, `--model` and `--base-url` change:
 
    ```sh
@@ -213,8 +213,8 @@ Nothing in the harness is specific to this engine. To add one:
 4. Compare: `python3 bench/compare.py bench/results/*.json`.
 
 If a server rejects a field the harness sends, drop it rather than editing `bench.py`: `--top-k` is only sent when you pass it, and
-`--temperature`/`--top-p` can be set to values the server accepts. A server that refuses `stream_options` cannot be measured honestly —
-without `usage.completion_tokens` there is no token count — so such a run is flagged `no_usage` instead of being counted from chunks.
+`--temperature`/`--top-p` can be set to values the server accepts. A server that refuses `stream_options` cannot be measured honestly:
+without `usage.completion_tokens` there is no token count, so such a run is flagged `no_usage` instead of being counted from chunks.
 
 Record what you changed: the engine version, the model file, and any flag that affects speed (context length, KV cache type,
 speculative decoding). Two rows of a table mean nothing without them, which is why `gpu`, `model` and `base_url` are in every result file.

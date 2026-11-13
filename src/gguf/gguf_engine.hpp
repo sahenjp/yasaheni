@@ -42,31 +42,23 @@ FileKindInfo detect_file_kind(const std::string& path);
 // ---------------------------------------------------------------------------
 // The shapes the compiled kernels accept.
 //
-// Mirrors the hard gate in the Engine35 constructor (src/engine35.cpp:216-218)
-// and the constants in src/q35.hpp: Q35_H 5120, Q35_NH 24, Q35_KVH 4,
-// Q35_HD 256. They are repeated here rather than included because q35.hpp pulls
+// These are the LEGACY attention path's numbers, not Engine35's. The legacy
+// kernels are not templated over the attention shape: src/post_kernels.cu:47
+// writes q16 with a literal stride of 28 heads x 128 slots and
+// src/attention_kv4q.cu:81 reads it back with the same assumption. They were
+// built for a 28-head, head_dim-128 model and never generalised.
+//
+// Repeated here rather than included from src/q35.hpp because that header pulls
 // in CUDA headers and this translation unit must stay host-only.
 // ---------------------------------------------------------------------------
 namespace kernel_shape {
-inline constexpr const char* kArch = "qwen3_5";
-inline constexpr int kHidden = 5120;
-inline constexpr int kHeads = 24;
-inline constexpr int kKvHeads = 4;
-inline constexpr int kHeadDim = 256;
-inline constexpr int kFfnMultiple = 512;
-
-// What the LEGACY attention path actually requires. It is not templated:
-// src/post_kernels.cu:47 writes q16 with a literal stride of 28 heads x 128
-// slots, and src/attention_kv4q.cu:81 reads it back with the same assumption.
-// These are not the same numbers as the Engine35 constants above -- the legacy
-// kernels were built for a 28-head, head_dim-128 model and never generalised.
 inline constexpr int kLegacyHeads = 28;
 inline constexpr int kLegacyHeadDim = 128;
+inline constexpr int kFfnMultiple = 512;
 }  // namespace kernel_shape
 
-// Can Engine35 run a model with this config *today*? 'reason' is filled either
-// way: the mismatch list when false, the remaining blocker when true. Both are
-// meant to be shown to a user verbatim, so they name numbers, not codes.
+// Can the engine load a model with this config *today*? 'reason' names the
+// numbers either way, because it is shown to a user verbatim.
 bool engine_supports(const ModelConfig& cfg, std::string& reason);
 
 // ---------------------------------------------------------------------------

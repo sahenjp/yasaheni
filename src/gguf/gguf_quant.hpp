@@ -69,7 +69,7 @@ struct QuantConfig {
   std::string sign_rule = "mulberry32_7919_13";
   // Lloyd rounds over the trellis-reachable states after the initial k-means.
   // 0 keeps the plain k-means codebook (faster, noticeably lossier).
-  int refine_iterations = 4;
+  int refine_iterations = 2;
 };
 
 // ---------------------------------------------------------------------------
@@ -148,9 +148,14 @@ Codebook train_codebook(const float* B, size_t n, int seed);
 // refine_codebook() runs one Viterbi pass, moves each centroid to the mean of
 // the pairs that actually landed on it, and repeats. 'iterations' of 0 returns
 // 'start' unchanged. The max|q| == 127 invariant is re-applied every round.
+//
+// When 'stream_out' is non-null it receives the trellis stream for the codebook
+// that is returned. The loop's last Viterbi pass ran against the previous
+// codebook, so one final pass is needed either way; doing it here lets
+// quantize_tensor skip its own, which saves a whole Viterbi pass per tensor.
 // ---------------------------------------------------------------------------
 Codebook refine_codebook(const float* B, int rows, int cols, const Codebook& start, int bits,
-                         int iterations = 4);
+                         int iterations = 2, std::vector<uint32_t>* stream_out = nullptr);
 
 // ---------------------------------------------------------------------------
 // Step 6+7: Viterbi and bit packing.

@@ -4,7 +4,7 @@ This is a fork of [YASAKANI](https://github.com/yasakani-dev/yasakani) that port
 
 ## What is most useful right now
 
-1. **A run on a GPU other than the RTX 3070 this was developed on.** The library builds for `sm_80/86/89/90/120`; only `sm_86` has actually been executed. If you have an A100, H100, 4090, 5090 or anything else, `scripts/check-env.sh` plus a `cuobjdump --list-elf` of the built library and a note on whether `yskn_open` returns an engine is exactly the report needed.
+1. **A run on a GPU other than the RTX 3070 this was developed on.** The library builds for `sm_80/86/89/90/120`; only `sm_86` has actually been executed. If you have an A100, H100, 4090, 5090 or anything else, `scripts/check-env.sh` plus a `cuobjdump --list-elf` of the built library and a note on whether `yskn_open` returns an engine is the report needed.
 2. **A real GGUF file that fails to parse.** The reader was checked against 19 real files and llama.cpp's own dequantizers, but more shapes are always useful. Include the file's metadata (`gguf_dump.py` output or the first 4 KB) rather than the whole file.
 3. **Anything the GGUF name mapper does not cover.** `yskn_gguf_probe` prints a coverage report with `unmatched` and `missing` lists; a model that shows entries there is a concrete bug.
 
@@ -21,14 +21,14 @@ All four must pass. The C++ tests need no GPU.
 
 ## What needs its own test results
 
-* **A new GPU architecture.** Add it to `CUDA_ARCH`, build, and show that the kernels run — the two instructions that needed guarding (`griddepcontrol`, `cp.async.bulk.prefetch`) are in `src/pdl.cuh` and are the likely failure point.
+* **A new GPU architecture.** Add it to `CUDA_ARCH`, build, and show that the kernels run. The two instructions that needed guarding (`griddepcontrol`, `cp.async.bulk.prefetch`) are in `src/pdl.cuh` and are the likely failure point.
 * **A change to the quantization bridge.** `docs/GGUF_NOTES.md` records the measured RMS at each `bits` value; a change that makes those numbers worse needs to say why that is acceptable.
 * **A change to the reader.** The dequantizers are verified bit-identical against llama.cpp's `dequantize_row_*`. Keep it that way or explain the divergence.
 
 ## Style
 
 * C++17, no dependencies beyond the STL and the vendored nlohmann/json.
-* Comment the non-obvious arithmetic — the trellis window, the warp interleave, the Hadamard scaling. Those are the parts a reader cannot infer.
+* Comment the non-obvious arithmetic: the trellis window, the warp interleave, the Hadamard scaling. Those are the parts a reader cannot infer.
 * Do not change `--fmad=false`. The numerics were tuned with fused multiply-add contraction disabled.
 
 ## License

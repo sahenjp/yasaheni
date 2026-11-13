@@ -260,11 +260,98 @@ void rotate_matrix(const float* W, int rows, int cols, const QuantConfig& cfg, f
 }
 
 // ---------------------------------------------------------------------------
-// Step 5. Lloyd's algorithm with a deterministic sample init.
+// Exact 2-D nearest-centroid search.
 //
-// GPU: the nearest-centroid scan below is O(pairs * 4096) and dominates the
-// converter. Port it as one block per point batch with the 4096 centroids in
-// shared memory (32 KiB), or replace it with a 64x64 bucket grid on the host.
+// The Lloyd loop below is O(pairs * 4096) with a linear scan, and at 27B scale
+// that is 1.4e13 distance evaluations per matrix -- days of CPU. A k-d tree over
+// the 4096 centroids turns each query into a handful of node visits while
+// returning exactly the same answer, including the same tie-break (lowest index
+// wins), so the trained codebook is bit-identical to the scan's.
+//
+// The tree is rebuilt once per Lloyd iteration because the centroids move.
+// ---------------------------------------------------------------------------
+class CentroidTree {
+ public:
+  CentroidTree(const float* cx, const float* cy, int n) : cx_(cx), cy_(cy), n_(n) {
+    idx_.resize(n);
+    for (int i = 0; i < n; ++i) idx_[i] = i;
+    nodes_.reserve(2 * n);
+    root_ = build(0, n, 0);
+  }
+
+  // Index of the centroid nearest to (x, y); ties go to the lowest index.
+  int nearest(float x, float y) const {
+    best_ = kInf;
+    best_i_ = 0;
+    search(root_, x, y);
+    return best_i_;
+  }
+
+ private:
+  struct Node {
+    int left = -1, right = -1;
+    int begin = 0, end = 0;  // leaf range in idx_
+    int axis = 0;
+    float split = 0.f;
+    bool leaf = false;
+  };
+
+  int build(int begin, int end, int depth) {
+    const int id = static_cast<int>(nodes_.size());
+    nodes_.push_back(Node{});
+    if (end - begin <= kLeafSize) {
+      nodes_[id].leaf = true;
+      nodes_[id].begin = begin;
+      nodes_[id].end = end;
+      return id;
+    }
+    const int axis = depth & 1;
+    const int mid = (begin + end) / 2;
+    std::nth_element(idx_.begin() + begin, idx_.begin() + mid, idx_.begin() + end,
+                     [&](int a, int b) { return (axis ? cy_[a] : cx_[a]) < (axis ? cy_[b] : cx_[b]); });
+    nodes_[id].axis = axis;
+    nodes_[id].split = axis ? cy_[idx_[mid]] : cx_[idx_[mid]];
+    nodes_[id].left = build(begin, mid, depth + 1);
+    nodes_[id].right = build(mid, end, depth + 1);
+    return id;
+  }
+
+  void search(int id, float x, float y) const {
+    const Node& nd = nodes_[id];
+    if (nd.leaf) {
+      for (int i = nd.begin; i < nd.end; ++i) {
+        const int k = idx_[i];
+        const float dx = x - cx_[k], dy = y - cy_[k];
+        const float d = dx * dx + dy * dy;
+        if (d < best_ || (d == best_ && k < best_i_)) {
+          best_ = d;
+          best_i_ = k;
+        }
+      }
+      return;
+    }
+    const float v = nd.axis ? y : x;
+    const float diff = v - nd.split;
+    const int near_id = diff < 0.f ? nd.left : nd.right;
+    const int far_id = diff < 0.f ? nd.right : nd.left;
+    search(near_id, x, y);
+    // Visit the far side only if the splitting plane is closer than the best.
+    if (diff * diff <= best_) search(far_id, x, y);
+  }
+
+  static constexpr int kLeafSize = 16;
+  const float* cx_;
+  const float* cy_;
+  int n_;
+  std::vector<int> idx_;
+  std::vector<Node> nodes_;
+  int root_ = 0;
+  mutable float best_ = kInf;
+  mutable int best_i_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Step 5. Lloyd's algorithm with a deterministic sample init.
 // ---------------------------------------------------------------------------
 Codebook train_codebook(const float* B, size_t n, int seed) {
   if (!B) throw std::invalid_argument("train_codebook: null buffer");
@@ -307,30 +394,19 @@ Codebook train_codebook(const float* B, size_t n, int seed) {
   }
 
   // Lloyd. Fixed iteration cap plus an early exit on a stable partition keeps
-  // the result a deterministic function of (B, n, seed).
+  // the result a deterministic function of (B, n, seed). The nearest-centroid
+  // query goes through an exact k-d tree, which returns the same index the
+  // linear scan would (including the lowest-index tie-break), so the codebook
+  // is bit-identical to the O(pairs * 4096) version.
   constexpr int kIters = 10;
   std::vector<uint32_t> assign(np, 0u);
   std::vector<double> sx(kLutSize), sy(kLutSize);
   std::vector<uint32_t> cnt(kLutSize);
   for (int it = 0; it < kIters; ++it) {
+    const CentroidTree tree(cx.data(), cy.data(), kLutSize);
     size_t changed = 0;
     for (size_t t = 0; t < np; ++t) {
-      const float x = B[2 * t], y = B[2 * t + 1];
-      float best = kInf;
-      int bi = 0;
-      const float* px = cx.data();
-      const float* py = cy.data();
-      for (int k = 0; k < kLutSize; ++k) {
-        const float dx = x - px[k];
-        const float dxx = dx * dx;
-        if (dxx >= best) continue;  // dy*dy >= 0, so this cannot win
-        const float dy = y - py[k];
-        const float d = dxx + dy * dy;
-        if (d < best) {  // strict: first minimum wins, keeps ties deterministic
-          best = d;
-          bi = k;
-        }
-      }
+      const int bi = tree.nearest(B[2 * t], B[2 * t + 1]);
       if (assign[t] != static_cast<uint32_t>(bi)) {
         assign[t] = static_cast<uint32_t>(bi);
         ++changed;
@@ -430,6 +506,10 @@ void viterbi_quantize(const float* B, int rows, int cols, const Codebook& cb, in
     fq1[s] = static_cast<float>(cb.q1[s]) * cb.gamma;
   }
 
+  // dp/cost/best are indexed by state every step, so they stay hot in L1
+  // (4096 floats = 16 KiB). arg is written once per step and read back in
+  // reverse at the end, so it is the only structure that has to be large:
+  // 128 steps * 2^(12-bits) entries, 512 B at bits=8 and 2 KiB at bits=4.
   std::vector<float> dp(kLutSize), ndp(kLutSize), cost(kLutSize), best(nbase);
   std::vector<uint8_t> arg(static_cast<size_t>(kStepsPerSeq) * nbase);
   std::vector<uint8_t> gbits(kStepsPerSeq);
@@ -524,7 +604,7 @@ void interleave_warp(const std::vector<uint32_t>& words, int rows, int seqs, int
 // move each centroid to their mean. Repeat a few times.
 // ---------------------------------------------------------------------------
 Codebook refine_codebook(const float* B, int rows, int cols, const Codebook& start, int bits,
-                         int iterations) {
+                         int iterations, std::vector<uint32_t>* stream_out) {
   if (!B) throw std::invalid_argument("refine_codebook: null buffer");
   if (bits != 4 && bits != 6 && bits != 8) throw std::invalid_argument("refine_codebook: bits must be 4, 6 or 8");
   if (rows <= 0 || cols <= 0) throw std::invalid_argument("refine_codebook: empty matrix");
@@ -535,6 +615,11 @@ Codebook refine_codebook(const float* B, int rows, int cols, const Codebook& sta
   std::vector<double> sx(kLutSize), sy(kLutSize);
   std::vector<uint32_t> cnt(kLutSize);
 
+  // Each round costs one Viterbi pass plus one accumulate pass. The caller needs
+  // the stream for the *final* codebook, so the last round's Viterbi is the one
+  // worth keeping: run 'iterations' update rounds, then a single Viterbi against
+  // the codebook that comes out. That is 'iterations + 1' passes total, and
+  // quantize_tensor reuses the last one instead of running its own.
   for (int it = 0; it < iterations; ++it) {
     viterbi_quantize(B, rows, cols, cb, bits, words);
 
@@ -592,6 +677,13 @@ Codebook refine_codebook(const float* B, int rows, int cols, const Codebook& sta
       q = static_cast<int8_t>(c < 0.f ? -127 : 127);
     }
   }
+
+  // The loop ends with 'words' describing the codebook from *before* the last
+  // centroid update, so it is stale. Rather than make the caller run Viterbi a
+  // third time against the final codebook, do it here and hand the stream back:
+  // the Viterbi pass is the most expensive step in the pipeline, so this is one
+  // whole pass saved per tensor.
+  if (stream_out) viterbi_quantize(B, rows, cols, cb, bits, *stream_out);
   return cb;
 }
 
@@ -643,6 +735,7 @@ QuantizedTensor quantize_tensor(const float* W, int rows, int cols, const QuantC
   // Step 5: codebook. Train on the real rows only -- the zero padding would
   // otherwise dominate the k-means with a giant (0,0) cluster.
   Codebook cb;
+  std::vector<uint32_t> logical;  // the trellis stream, produced below
   if (shared) {
     cb = *shared;
   } else {
@@ -650,19 +743,20 @@ QuantizedTensor quantize_tensor(const float* W, int rows, int cols, const QuantC
     cb = train_codebook(A.data(), static_cast<size_t>(rows) * cols, seed);
     // Plain k-means ignores the trellis constraint, which costs a lot of
     // accuracy (measured: ~18% of full scale at bits=8 against ~0.5% for the
-    // unconstrained bound). A few Lloyd rounds over the states the encoder can
-    // actually reach close most of that gap.
+    // unconstrained bound). Lloyd rounds over the states the encoder can
+    // actually reach close most of that gap, and the last round hands back the
+    // stream it produced so step 6 does not have to repeat the search.
     if (cfg.refine_iterations > 0) {
-      cb = refine_codebook(A.data(), physical_rows, cols, cb, bits, cfg.refine_iterations);
+      cb = refine_codebook(A.data(), physical_rows, cols, cb, bits, cfg.refine_iterations, &logical);
     }
   }
   if (!(cb.gamma > 0.f) || !std::isfinite(cb.gamma)) {
     throw std::invalid_argument("quantize_tensor: codebook gamma must be finite and positive");
   }
 
-  // Step 6+7: Viterbi over every physical row, then the warp interleave.
-  std::vector<uint32_t> logical;
-  viterbi_quantize(A.data(), physical_rows, cols, cb, bits, logical);
+  // Step 6+7: Viterbi over every physical row (unless refine_codebook already
+  // did it), then the warp interleave.
+  if (logical.empty()) viterbi_quantize(A.data(), physical_rows, cols, cb, bits, logical);
 
   QuantizedTensor t;
   t.rows = rows;
