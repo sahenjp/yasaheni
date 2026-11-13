@@ -629,6 +629,71 @@ int main(int argc, char** argv) {
   check(yskn::gguf::type_supported(yskn::gguf::TYPE_Q6_K), "Q6_K is supported");
   check(!yskn::gguf::type_supported(9999), "an unknown type is not supported");
 
+  // ---- other fixture variants -------------------------------------------
+  // Same content, GGUF v2 header: the parser must accept both versions.
+  {
+    std::string v2 = fixture;
+    const size_t slash = v2.find_last_of('/');
+    const std::string dir2 = slash == std::string::npos ? std::string() : v2.substr(0, slash + 1);
+    v2 = dir2 + "gguf_fixture_v2.gguf";
+    if (file_exists(v2)) {
+      std::printf("\nGGUF v2 variant:\n");
+      yskn::gguf::File f2;
+      bool ok = true;
+      try {
+        f2.open(v2);
+      } catch (const std::exception& e) {
+        ok = false;
+        check(false, std::string("open v2 fixture: ") + e.what());
+      }
+      if (ok) {
+        check_eq(f2.version(), uint32_t{2}, "v2 fixture reports version 2");
+        check_eq(f2.tensors().size(), file.tensors().size(), "v2 fixture tensor count");
+        check_eq(f2.meta().size(), file.meta().size(), "v2 fixture metadata count");
+        // Every tensor must dequantize to exactly the same floats as in v3.
+        bool same = true;
+        for (const auto& t : f2.tensors()) {
+          const std::vector<float> a = f2.dequant(t);
+          const std::vector<float> b = file.dequant(t.name);
+          if (a != b) {
+            same = false;
+            check(false, "v2/v3 dequant mismatch for " + t.name);
+            break;
+          }
+        }
+        check(same, "v2 and v3 fixtures dequantize identically");
+      }
+    }
+  }
+
+  // A metadata-only file (no tensors, no data section), like the
+  // ggml-vocab-*.gguf files llama.cpp ships.
+  {
+    std::string vocab = fixture;
+    const size_t slash = vocab.find_last_of('/');
+    const std::string dir2 = slash == std::string::npos ? std::string() : vocab.substr(0, slash + 1);
+    vocab = dir2 + "gguf_vocab_only.gguf";
+    if (file_exists(vocab)) {
+      std::printf("\nMetadata-only variant:\n");
+      yskn::gguf::File f3;
+      bool ok = true;
+      try {
+        f3.open(vocab);
+      } catch (const std::exception& e) {
+        ok = false;
+        check(false, std::string("open metadata-only fixture: ") + e.what());
+      }
+      if (ok) {
+        check_eq(f3.tensors().size(), size_t{0}, "metadata-only file has no tensors");
+        check(f3.meta().size() > 0, "metadata-only file still exposes metadata");
+        check_eq(f3.meta().get_string("general.architecture", ""), std::string("llama"),
+                 "metadata-only general.architecture");
+        check(f3.data_base() >= f3.file_size(),
+              "metadata-only data base sits at or past EOF");
+      }
+    }
+  }
+
   // ---- negative tests ---------------------------------------------------
   std::printf("\nNegative tests:\n");
   run_negative_tests(out_dir);

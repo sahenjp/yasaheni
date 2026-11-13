@@ -617,6 +617,8 @@ def main(argv):
                     help="GGUF version to emit")
     ap.add_argument("--alignment", type=int, default=32,
                     help="general.alignment to emit")
+    ap.add_argument("--no-tensors", action="store_true",
+                    help="emit a metadata-only file (like llama.cpp's ggml-vocab-*.gguf)")
     args = ap.parse_args(argv)
 
     alignment = args.alignment
@@ -668,6 +670,9 @@ def main(argv):
         ("q8_k_1d", [256], Q8_K, build_q8_K(q8_k_vals)),
         ("iq4_nl_1d", [32], IQ4_NL, build_iq4_nl(iq4_vals)),
     ]
+
+    if args.no_tensors:
+        plan = []
 
     tensors = []
     offset = 0

@@ -53,11 +53,24 @@ printf 'arch      %s\n' "$cuda_arch"
 printf 'build dir %s\n' "$build_dir"
 
 # ---- configure + build -----------------------------------------------------------------------------------------------
+# CMakeLists.txt lets -DYSKN_CUDA_ARCH win over -DCMAKE_CUDA_ARCHITECTURES.  When CUDA_ARCH is given explicitly we clear that
+# cache entry so the requested list is the one that is built; otherwise an existing cache is left exactly as it is (incremental).
+extra=()
+if [[ -n "${CUDA_ARCH:-}" ]]; then
+    extra+=(-DYSKN_CUDA_ARCH=)
+fi
+
 mkdir -p "$build_dir"
 cmake -S "$root" -B "$build_dir" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CUDA_COMPILER="$nvcc" \
-    -DCMAKE_CUDA_ARCHITECTURES="$cuda_arch"
+    -DCMAKE_CUDA_ARCHITECTURES="$cuda_arch" \
+    "${extra[@]+"${extra[@]}"}"
+# What the build files really ask for: CMakeLists.txt lets YSKN_CUDA_ARCH win, so the cache alone can mislead.  An explicit list
+# becomes "arch=compute_N"; "native" becomes a bare "-arch=native".
+effective="$(grep -oh -- 'arch=compute_[0-9a-z]*\|-arch=native' "$build_dir/build.ninja" 2>/dev/null |
+             sed -e 's/.*compute_//' -e 's/^-arch=//' | sort -un | paste -sd';' - || true)"
+printf 'compiling %s\n' "${effective:-unknown}"
 cmake --build "$build_dir" --parallel "$jobs"
 
 # ---- report ----------------------------------------------------------------------------------------------------------

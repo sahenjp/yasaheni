@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -17,8 +18,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cmake ninja-build build-essential
 
+      # Installs the toolkit and puts $CUDA_PATH/bin (nvcc) on PATH for the steps below.
+      # 12.8 is the first release that can emit sm_120 (RTX 5090), which the engine needs.
       - name: Install the CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.19
+        uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda: "12.8.0"
           method: network
@@ -45,13 +48,7 @@ jobs:
           so=build-linux/libyskn.so
           test -f "$so" || { echo "::error::$so was not produced"; exit 1; }
           ls -l "$so"
-          nm -D --defined-only "$so" | tee symbols.txt
-          grep -qE '\bT\s+yskn_open$' symbols.txt || { echo "::error::yskn_open is not exported by $so"; exit 1; }
+          nm -D --defined-only "$so" > symbols.txt
+          grep -E '\bT\s+yskn_open$' symbols.txt || {
+            echo "::error::yskn_open is not exported by $so"; head -n 40 symbols.txt; exit 1; }
           echo "yskn_open is exported"
-
-      - name: Upload the library
-        uses: actions/upload-artifact@v4
-        with:
-          name: libyskn-linux-x86_64
-          path: build-linux/libyskn.so
-          if-no-files-found: error
