@@ -1,47 +1,73 @@
-# Building yskn.dll from source
+# Building the engine
 
-The release page has a prebuilt `yskn.dll`. You can also build it yourself. You do not need a GPU to build it, only to run it.
-日本語：Visual Studio 2022 Build Tools（C++）、CUDA Toolkit、CMake、Ninja を入れ、「x64 Native Tools Command Prompt for VS 2022」で下の 2 つのコマンドを実行します。
+The engine is one shared library, `libyskn.so` on Linux and `yskn.dll` on Windows. You do not need a GPU to build it, only to run it.
 
-## What the release was built with (2026-11-07)
+## Requirements
 
 | | |
 |---|---|
-| OS | Windows 11, x64 |
-| C++ compiler | Microsoft Visual C++ 19.44.35226 (Visual Studio 2022 Build Tools, toolset 14.44.35207) |
-| CUDA | NVIDIA CUDA Toolkit 13.2 (nvcc 13.2.78) |
-| Build tools | CMake (3.24 or newer is required) and Ninja |
-| Target | compute capability 12.0 (`sm_120`): the RTX 5090 only |
+| OS | Linux (tested on Fedora 44) or Windows 11 |
+| C++ compiler | GCC 13+ or Clang 16+ on Linux; MSVC 19.4x on Windows |
+| CUDA | CUDA Toolkit 12.8 or newer (13.5 tested). `sm_120` needs 12.8+. |
+| Build tools | CMake 3.24 or newer, Ninja |
+| Python | 3.10+ (only for the Python package) |
 
-The `yskn.dll` on the release page is this build (SHA-256 `0f5d973b791c8d66034d87bdfc7f2c018718dc0e851b9a6ee6dc1eb275150bbb`). It was built
-from this source with the two commands below (the CUDA compiler was named explicitly with `-DCMAKE_CUDA_COMPILER`), and it is the build
-the YASAKANI speed tables in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) were measured with. Other compiler or CUDA versions have not been
-tried. Compute capability 12.0 needs a recent CUDA Toolkit.
+## Linux
 
-## Steps
+```bash
+scripts/check-env.sh          # nvcc, driver, GPU, python
+scripts/build-linux.sh
+```
 
-Open the **x64 Native Tools Command Prompt for VS 2022** (so that the compiler is on the path), go to the source folder (the one with
-`CMakeLists.txt`) and run:
+`scripts/build-linux.sh` finds `nvcc` on `PATH`, then in `$CUDA_HOME`, then in `/usr/local/cuda`. The architecture list comes from `CUDA_ARCH` (default `120;86;80`):
+
+```bash
+CUDA_ARCH="80;86;89;90;120" scripts/build-linux.sh   # one binary for Ampere through Blackwell
+CUDA_ARCH=native scripts/build-linux.sh              # only this machine's GPU
+```
+
+Or drive CMake directly:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYSKN_CUDA_ARCH="80;86;89;90;120"
+cmake --build build -j
+```
+
+`-DYSKN_CUDA_ARCH` also accepts `native` and `portable` (`120;90;86;80;75`). Without it, `-DCMAKE_CUDA_ARCHITECTURES` is used, defaulting to `120`.
+
+## Windows
+
+Open the **x64 Native Tools Command Prompt for VS 2022**, go to the source folder and run:
 
 ```bat
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-The result is `build\yskn.dll` (about 26 MB; the CUDA runtime is linked statically, so no CUDA Toolkit is needed to run it). The recorded build of
-the release took about a minute and a half and printed many compiler warnings; they are known.
+The result is `build\yskn.dll`.
 
-Pass the file to the tools with `--dll`:
+## What the build flags are for
 
-```bat
-yasakani info --model-dir D:\models\qwen38 --dll build\yskn.dll
+* `--fmad=false` is not cosmetic. The engine's numerics were tuned and verified with fused multiply-add contraction disabled; turning it on changes results.
+* `-Xptxas -O3` and `--allow-expensive-optimizations=true` are kept on every platform so the register allocation matches what was measured.
+* On Linux the CUDA runtime is linked statically (`CUDA::cudart_static`), so the `.so` needs only the NVIDIA driver at run time, not the toolkit.
+* Visibility is hidden by default and the C ABI is exported explicitly (`include/yskn_abi.h` uses `__attribute__((visibility("default")))`). `-Wl,--no-undefined` turns a missing symbol into a link error rather than a run-time crash.
+
+## Architectures
+
+The kernels need `sm_80` or newer. Two instructions used upstream only exist from `sm_90`:
+
+* `griddepcontrol.wait` / `griddepcontrol.launch_dependents` (PDL)
+* `cp.async.bulk.prefetch.L2.global`
+
+Both are behind `__CUDA_ARCH__` guards in `src/pdl.cuh`, and `pdl_enabled()` checks the device's compute capability before asking for the PDL launch attribute. Building for `sm_80` therefore works and produces a correct, slightly slower binary.
+
+## Verifying a build
+
+```bash
+nm -D --defined-only build/libyskn.so | grep yskn_open   # the C ABI is exported
+cuobjdump --list-elf build/libyskn.so | grep -o 'sm_[0-9]*' | sort -u   # which architectures are inside
+cd tests/gguf && cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build
 ```
 
-`yasakani info` prints the SHA-256 of the DLL. A build made with a different compiler or CUDA version will not be byte-identical to the file on the
-release page; that is expected. Check the model files with `yasakani verify`, and the whole installation with `yasakani selfcheck`.
-
-## Layout
-
-* `src/`: the engine (C++ and CUDA); `include/`: the C interface that the Python package binds to; `third_party/`: nlohmann/json (MIT).
-* The Python package is built and installed separately (`pip install .` in its folder).
-* The tool that converts a model into the YASAKANI file format is not part of this release.
+The GGUF tests need no GPU.
