@@ -192,3 +192,77 @@ add_test(NAME gguf_engine_wiring
           --unknown ${CMAKE_CURRENT_BINARY_DIR}/fixture/gguf_model_unknown.gguf
           --out-dir ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# --- GGUF-backed container test ---------------------------------------------
+# GgufContainer (src/gguf/gguf_container.cpp) materialises a GGUF file into the
+# in-memory image src/loader.cpp's Model::load reads. It links the reader, the
+# adapter (read_config), the name mapper (validate/coverage live in the same
+# translation unit) and the encoder. Host only -- no CUDA, no GPU.
+#
+# src/format.hpp pulls in nlohmann/json.hpp, so third_party/ is on the include
+# path even though this test never parses a YSKN container.
+add_executable(gguf_container_test
+  gguf_container_test.cpp
+  ${YSKN_GGUF_SRC}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_model.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_map.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_quant.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_container.cpp
+)
+
+target_include_directories(gguf_container_test PRIVATE
+  ${YSKN_GGUF_INCLUDE}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party
+)
+
+if(MSVC)
+  target_compile_options(gguf_container_test PRIVATE /W4 /utf-8)
+else()
+  target_compile_options(gguf_container_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# The container fixtures. tools/make_tiny_gguf.py writes a Qwen3-shaped GGUF
+# plus a .json sidecar of expected values. Five variants:
+#
+#   tiny        2 layers, the loadable model
+#   tiny_bad    hidden 96, not a multiple of 256: must be rejected
+#   tiny_miss   no blk.1.ffn_down.weight: must be rejected
+#   tiny_tie    tied embeddings (no output.weight)
+#   tiny_nobias no attn_q/k/v.bias (the container synthesises zeros)
+set(GGUF_CONTAINER_FIXTURES
+  ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny.gguf
+  ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_bad.gguf
+  ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_missing.gguf
+  ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_tie.gguf
+  ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_nobias.gguf
+)
+
+add_custom_command(
+  OUTPUT ${GGUF_CONTAINER_FIXTURES}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/fixture
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/make_tiny_gguf.py
+          --out ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny.gguf
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/make_tiny_gguf.py
+          --out ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_bad.gguf --variant badshape
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/make_tiny_gguf.py
+          --out ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_missing.gguf --variant missing
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/make_tiny_gguf.py
+          --out ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_tie.gguf --variant tie --layers 1
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/make_tiny_gguf.py
+          --out ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_nobias.gguf --variant nobias --layers 1
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/make_tiny_gguf.py
+  COMMENT "Generating tiny GGUF container fixtures"
+  VERBATIM
+)
+
+add_custom_target(gguf_container_fixture ALL DEPENDS ${GGUF_CONTAINER_FIXTURES})
+add_dependencies(gguf_container_test gguf_container_fixture)
+
+add_test(NAME gguf_container
+  COMMAND gguf_container_test
+          --good ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny.gguf
+          --bad ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_bad.gguf
+          --missing ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_missing.gguf
+          --tie ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_tie.gguf
+          --nobias ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_nobias.gguf
+)
