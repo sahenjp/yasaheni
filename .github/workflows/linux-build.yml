@@ -1,0 +1,57 @@
+name: linux-build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build build-essential
+
+      - name: Install the CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: "12.8.0"
+          method: network
+          sub-packages: '["nvcc", "cudart", "crt"]'
+
+      - name: Show the toolchain
+        run: |
+          nvcc --version
+          cmake --version
+          ninja --version
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-linux -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="80;86;120"
+
+      - name: Build
+        run: cmake --build build-linux --parallel "$(nproc)"
+
+      - name: Check the exported symbols
+        run: |
+          set -euo pipefail
+          so=build-linux/libyskn.so
+          test -f "$so" || { echo "::error::$so was not produced"; exit 1; }
+          ls -l "$so"
+          nm -D --defined-only "$so" | tee symbols.txt
+          grep -qE '\bT\s+yskn_open$' symbols.txt || { echo "::error::yskn_open is not exported by $so"; exit 1; }
+          echo "yskn_open is exported"
+
+      - name: Upload the library
+        uses: actions/upload-artifact@v4
+        with:
+          name: libyskn-linux-x86_64
+          path: build-linux/libyskn.so
+          if-no-files-found: error

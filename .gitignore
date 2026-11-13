@@ -1,0 +1,13 @@
+# build trees
+/build/
+/build-*/
+/tests/**/build/
+__pycache__/
+*.pyc
+*.egg-info/
+# model weights are never committed
+*.gguf
+*.yskn
+*.safetensors
+*.bin
+!tests/**/*.gguf
