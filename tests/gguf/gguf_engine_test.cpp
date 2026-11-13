@@ -15,8 +15,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -97,6 +99,70 @@ void write_magic_file(const std::string& path, const char* magic) {
   // care -- it rejects on the magic and never parses the container.
   buf[4] = 1;
   f.write(buf, sizeof(buf));
+}
+
+// ---------------------------------------------------------------------------
+// A minimal GGUF v3 writer, used only to build a metadata-only file that passes
+// the 27B shape gate. That is the one branch the checked-in fixtures cannot
+// reach, and it is the branch that must say "not runnable yet" rather than
+// pretending the file would load.
+// ---------------------------------------------------------------------------
+void put_u32(std::string& out, uint32_t v) {
+  for (int i = 0; i < 4; ++i) out.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+}
+void put_u64(std::string& out, uint64_t v) {
+  for (int i = 0; i < 8; ++i) out.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+}
+void put_str(std::string& out, const std::string& s) {
+  put_u64(out, s.size());
+  out += s;
+}
+void put_f32(std::string& out, float v) {
+  uint32_t bits = 0;
+  std::memcpy(&bits, &v, 4);
+  put_u32(out, bits);
+}
+
+// GGUF metadata value types (mirrors yskn::gguf::ValueType).
+constexpr uint32_t kT_Uint32 = 4;
+constexpr uint32_t kT_Float32 = 6;
+constexpr uint32_t kT_String = 8;
+
+struct Kv {
+  std::string key;
+  uint32_t type;
+  std::string payload;  // already encoded
+};
+
+Kv kv_u32(const char* key, uint32_t v) {
+  std::string p;
+  put_u32(p, v);
+  return Kv{key, kT_Uint32, p};
+}
+Kv kv_f32(const char* key, float v) {
+  std::string p;
+  put_f32(p, v);
+  return Kv{key, kT_Float32, p};
+}
+Kv kv_str(const char* key, const char* v) {
+  std::string p;
+  put_str(p, v);
+  return Kv{key, kT_String, p};
+}
+
+// Write a GGUF v3 file with the given metadata and no tensors at all.
+void write_gguf_metadata_only(const std::string& path, const std::vector<Kv>& kvs) {
+  std::string out = "GGUF";
+  put_u32(out, 3);            // version
+  put_u64(out, 0);            // tensor_count
+  put_u64(out, kvs.size());   // kv_count
+  for (const Kv& kv : kvs) {
+    put_str(out, kv.key);
+    put_u32(out, kv.type);
+    out += kv.payload;
+  }
+  std::ofstream f(path, std::ios::binary);
+  f.write(out.data(), static_cast<std::streamsize>(out.size()));
 }
 
 // The exact reason the good fixture must produce. Every clause is a separate
@@ -246,6 +312,60 @@ void check_support_gate_accepts_27b_shape() {
            "engine_supports: rejects hidden 4096");
   check_contains(reason, "hidden is 4096, the kernels are built for 5120",
                  "engine_supports: the 4096 message is the documented one");
+}
+
+// A real GGUF file whose metadata passes the shape gate. probe() must report
+// supported=true with the "not wired in yet" reason, and yskn_open() must still
+// refuse it -- with that same reason, not a bare failure.
+void check_supported_gguf_is_still_refused(const std::string& path) {
+  std::printf("\n-- 27B-shaped metadata-only GGUF: %s\n", path.c_str());
+
+  const std::vector<Kv> kvs = {
+      kv_str("general.architecture", "qwen3_5"),
+      kv_str("general.name", "yskn 27b shape fixture"),
+      kv_u32("general.alignment", 32),
+      kv_u32("qwen3_5.block_count", 64),
+      kv_u32("qwen3_5.embedding_length", 5120),
+      kv_u32("qwen3_5.feed_forward_length", 17408),
+      kv_u32("qwen3_5.attention.head_count", 24),
+      kv_u32("qwen3_5.attention.head_count_kv", 4),
+      kv_u32("qwen3_5.attention.key_length", 256),
+      kv_u32("qwen3_5.rope.dimension_count", 64),
+      kv_u32("qwen3_5.context_length", 262144),
+      kv_u32("qwen3_5.vocab_size", 152064),
+      kv_f32("qwen3_5.attention.layer_norm_rms_epsilon", 1e-6f),
+      kv_f32("qwen3_5.rope.freq_base", 10000000.0f),
+  };
+  write_gguf_metadata_only(path, kvs);
+
+  const yskn::gguf::ProbeResult r = yskn::gguf::probe(path);
+  check(r.ok, "27B shape: the file parses");
+  check_eq(r.cfg.arch, std::string("qwen3_5"), "27B shape: arch");
+  check_eq(r.cfg.hidden, 5120, "27B shape: hidden");
+  check_eq(r.cfg.heads, 24, "27B shape: heads");
+  check_eq(r.cfg.kv_heads, 4, "27B shape: kv_heads");
+  check_eq(r.cfg.head_dim, 256, "27B shape: head_dim");
+  check_eq(r.cfg.ffn, 17408, "27B shape: ffn");
+
+  // The gate passes ...
+  check_eq(r.supported, true, "27B shape: the shape gate accepts it");
+  check_contains(r.reason, "not wired into", "27B shape: reason names the remaining blocker");
+  check_contains(r.reason, "YSKN container", "27B shape: reason says what it still reads");
+
+  // ... but the file is metadata-only, so validation must complain about the
+  // absent tensors. That is correct and must not be hidden.
+  check_eq(r.validation.ok, false, "27B shape: validation fails without tensors");
+
+  // The C ABI reports the same thing.
+  std::vector<char> buf(64 * 1024, 0);
+  const int rc = yskn_gguf_probe(path.c_str(), buf.data(), static_cast<int>(buf.size()));
+  check_eq(rc, 0, "27B shape: yskn_gguf_probe returns 0 (the file parsed)");
+  const json j = json::parse(std::string(buf.data()));
+  check_eq(j.at("supported").get<bool>(), true, "27B shape: JSON supported is true");
+  check_contains(j.at("reason").get<std::string>(), "not wired into",
+                 "27B shape: JSON reason");
+
+  std::remove(path.c_str());
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +602,7 @@ int main(int argc, char** argv) {
   check_detection(good, yskn_path, missing);
   check_good_probe(good);
   check_support_gate_accepts_27b_shape();
+  check_supported_gguf_is_still_refused(out_dir + "/gguf_engine_test_27b.gguf");
   check_yskn_rejected(yskn_path);
   check_missing_rejected(missing);
   check_broken_probe(broken);
