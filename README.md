@@ -15,7 +15,7 @@ Apache License 2.0, same as upstream. The engine kernels are the work of the YAS
 | Multi-architecture kernels | works; PDL and bulk prefetch degrade cleanly below `sm_90` |
 | GGUF v2/v3 reader | works; 16 ggml types dequantized, verified bit-identical against llama.cpp |
 | GGUF model adapter (config, name mapping, validation) | works; 377 checks |
-| GGUF to engine tensor quantization | in progress |
+| GGUF to engine tensor quantization | works; Viterbi verified optimal, 84 checks |
 | Running a GGUF model end to end | not yet; the 27B kernels are shape-specialised |
 
 ## Build
@@ -47,7 +47,7 @@ Both are now behind `__CUDA_ARCH__` guards (`src/pdl.cuh`), and the host-side la
 
 The dequantizers were checked three ways: against `dequantize_row_*` lifted from llama.cpp's `ggml-quants.c` (bit-identical on all 12 quantized types), against the official `gguf` Python package on 19 real GGUF files (including a full 151,936-token Qwen2 vocabulary), and by mutation and fuzz testing.
 
-`docs/GGUF_DESIGN.md` documents the `YSKN` container the engine was built around, and what a converter from GGUF to that format would need.
+`docs/GGUF_DESIGN.md` documents the `YSKN` container the engine was built around, and what a converter from GGUF to that format would need. `docs/GGUF_NOTES.md` records the measured behaviour of the quantization bridge: the trellis bound, the codebook refinement gains, and the bugs the round-trip oracle caught.
 
 ## Tests
 
