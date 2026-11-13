@@ -388,15 +388,19 @@ yskn::gguf::ModelConfig config_from_sidecar(const std::string& sidecar_path) {
 void check_gate(const std::string& hd128_sidecar, const std::string& hd64_sidecar) {
   std::printf("\n-- supported gate\n");
 
-  // head_dim 128, ffn 512: the legacy Engine's kernels can run this shape.
+  // head_dim 128 with 28 heads: the legacy Engine's kernels can run this shape.
+  // 28 x 128 is not a preference, it is what src/post_kernels.cu:47 and
+  // src/attention_kv4q.cu:81 literally index with.
   {
-    const yskn::gguf::ModelConfig c = config_from_sidecar(hd128_sidecar);
+    yskn::gguf::ModelConfig c = config_from_sidecar(hd128_sidecar);
+    c.heads = 28;
+    c.kv_heads = 4;
     check_eq(c.head_dim, 128, "gate: the accept fixture really is head_dim 128");
     check_eq(c.ffn % 512, 0, "gate: the accept fixture has ffn%512 == 0");
     std::string reason;
     check_eq(yskn::gguf::engine_supports(c, reason), true,
-             "gate: accepts head_dim 128");
-    // A supported config explains itself: yskn_open now loads it instead of
+             "gate: accepts head_dim 128 with 28 heads");
+    // A supported config explains itself: yskn_open loads it instead of
     // returning NULL, so the reason states what was satisfied.
     check_contains(reason, "kernel constraints are met",
                    "gate: a supported config says why it is supported");
@@ -411,20 +415,25 @@ void check_gate(const std::string& hd128_sidecar, const std::string& hd64_sideca
     check_eq(yskn::gguf::engine_supports(c, reason), false,
              "gate: rejects head_dim 64");
     check_contains(reason, "head_dim is 64", "gate: names the head_dim value");
-    check_contains(reason, "attention kernels only instantiate 128 and 256",
+    check_contains(reason, "the default attention path hard-codes 128",
                    "gate: names the attention-kernel constraint");
-    check_contains(reason, "attention_gqa.cu", "gate: cites the instantiation site");
+    check_contains(reason, "post_kernels.cu:47", "gate: cites the qkv_post site");
     check_contains(reason, "engine.cpp:41", "gate: cites the q16 allocation");
   }
 
-  // head_dim 256 is the other instantiation and must pass.
+  // head_dim 256 must be REFUSED. The generic attention path is templated for
+  // it, but that path is off by default, and on the default path a head_dim-256
+  // model loads and then returns NaN logits (measured on the RTX 3070). A gate
+  // that admits it would hand the user a silently wrong answer.
   {
     yskn::gguf::ModelConfig c = config_from_sidecar(hd128_sidecar);
     c.head_dim = 256;
-    c.heads = 1;  // keep heads*head_dim == hidden so only the gate is under test
+    c.heads = 28;
     std::string reason;
-    check_eq(yskn::gguf::engine_supports(c, reason), true,
-             "gate: accepts head_dim 256");
+    check_eq(yskn::gguf::engine_supports(c, reason), false,
+             "gate: rejects head_dim 256 (NaN on the default path)");
+    check_contains(reason, "head_dim is 256", "gate: names the refused head_dim");
+    check_contains(reason, "NaN", "gate: says what happens if it is admitted");
   }
 
   // ffn must still be a multiple of 512.

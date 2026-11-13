@@ -169,9 +169,12 @@ void write_gguf_metadata_only(const std::string& path, const std::vector<Kv>& kv
 // mismatch; keeping the whole string here means a change to the gate or to the
 // wording fails loudly instead of drifting.
 const char* kGoodReason =
-    "head_dim is 16, the attention kernels only instantiate 128 and 256 "
-    "(src/attention_gqa.cu:171-172) and q16 is sized heads*128 "
-    "(src/engine.cpp:41); "
+    "head_dim is 16, the default attention path hard-codes 128 slots per head "
+    "(src/post_kernels.cu:47, src/attention_kv4q.cu:81) and q16 is sized "
+    "heads*128 (src/engine.cpp:41); a head_dim-256 model loads and then returns "
+    "NaN logits, so it is refused here; "
+    "heads is 4, the default attention path hard-codes 28 "
+    "(src/post_kernels.cu:36-47, src/attention_kv4q.cu:81); "
     "ffn is 128, the kernels need a multiple of 512";
 
 // ---------------------------------------------------------------------------
@@ -254,7 +257,7 @@ void check_good_probe(const std::string& path) {
   check_eq(r.supported, false, "probe: the 2-layer fixture is not supported");
   check_eq(r.reason, std::string(kGoodReason), "probe: exact rejection reason");
   check_contains(r.reason, "head_dim is 16", "probe: reason names the head_dim mismatch");
-  check_contains(r.reason, "the attention kernels only instantiate", "probe: reason is actionable");
+  check_contains(r.reason, "the default attention path hard-codes", "probe: reason is actionable");
 
   // engine_supports() must agree with the probe.
   std::string reason;
@@ -279,10 +282,12 @@ void check_support_gate_accepts_27b_shape() {
   c.vocab = 152064;
 
   std::string reason;
-  check_eq(yskn::gguf::engine_supports(c, reason), true,
-           "engine_supports: accepts the 27B shape");
-  check_contains(reason, "kernel constraints are met (head_dim",
-                 "engine_supports: a supported shape says why it is supported");
+  // The 27B shape is Engine35's, not the legacy path's: heads 24 / head_dim 256
+  // is exactly what the legacy attention kernels cannot do.
+  check_eq(yskn::gguf::engine_supports(c, reason), false,
+           "engine_supports: rejects the 27B shape (legacy kernels want 28 x 128)");
+  check_contains(reason, "head_dim is 256", "engine_supports: names head_dim 256");
+  check_contains(reason, "heads is 24", "engine_supports: names heads 24");
 
   // ffn must be a multiple of 512.
   c.ffn = 17400;
@@ -293,26 +298,30 @@ void check_support_gate_accepts_27b_shape() {
   // Each shape field is checked independently.
   c.ffn = 17408;
   c.head_dim = 128;
+  c.heads = 28;
   check_eq(yskn::gguf::engine_supports(c, reason), true,
-           "engine_supports: accepts head_dim 128 (the kernels instantiate it)");
+           "engine_supports: accepts head_dim 128 with 28 heads");
   c.head_dim = 64;
   check_eq(yskn::gguf::engine_supports(c, reason), false,
            "engine_supports: rejects head_dim 64");
   check_contains(reason, "head_dim is 64", "engine_supports: names the head_dim value");
-  c.head_dim = 256;
+  c.head_dim = 128;
   // The legacy Engine reads heads/kv_heads/hidden from ModelDesc, so those are
   // not gated here; only the templated kernel shapes are.
+  // kv_heads and hidden are read from ModelDesc, so they are not gated; only the
+  // shapes baked into the kernels are.
   c.kv_heads = 8;
   check_eq(yskn::gguf::engine_supports(c, reason), true,
-           "engine_supports: accepts kv_heads 8 (the legacy Engine is shape-parametric)");
+           "engine_supports: accepts kv_heads 8 (read from ModelDesc)");
   c.kv_heads = 4;
-  c.heads = 32;
-  check_eq(yskn::gguf::engine_supports(c, reason), true,
-           "engine_supports: accepts heads 32");
-  c.heads = 24;
   c.hidden = 4096;
   check_eq(yskn::gguf::engine_supports(c, reason), true,
-           "engine_supports: accepts hidden 4096");
+           "engine_supports: accepts hidden 4096 (read from ModelDesc)");
+  c.hidden = 5120;
+  c.heads = 32;
+  check_eq(yskn::gguf::engine_supports(c, reason), false,
+           "engine_supports: rejects heads 32");
+  c.heads = 28;
 }
 
 // A real GGUF file whose metadata passes the shape gate. probe() must report
@@ -349,9 +358,8 @@ void check_supported_gguf_is_still_refused(const std::string& path) {
   check_eq(r.cfg.ffn, 17408, "27B shape: ffn");
 
   // The gate passes ...
-  check_eq(r.supported, true, "27B shape: the shape gate accepts it");
-  check_contains(r.reason, "kernel constraints are met (head_dim",
-                 "27B shape: a supported shape says why it is supported");
+  check_eq(r.supported, false, "27B shape: the legacy gate rejects it");
+  check_contains(r.reason, "head_dim is 256", "27B shape: reason names head_dim");
 
   // ... but the file is metadata-only, so validation must complain about the
   // absent tensors. That is correct and must not be hidden.
@@ -362,8 +370,8 @@ void check_supported_gguf_is_still_refused(const std::string& path) {
   const int rc = yskn_gguf_probe(path.c_str(), buf.data(), static_cast<int>(buf.size()));
   check_eq(rc, 0, "27B shape: yskn_gguf_probe returns 0 (the file parsed)");
   const json j = json::parse(std::string(buf.data()));
-  check_eq(j.at("supported").get<bool>(), true, "27B shape: JSON supported is true");
-  check_contains(j.at("reason").get<std::string>(), "kernel constraints are met (head_dim",
+  check_eq(j.at("supported").get<bool>(), false, "27B shape: JSON supported is false");
+  check_contains(j.at("reason").get<std::string>(), "head_dim is 256",
                  "27B shape: JSON reason");
 
   std::remove(path.c_str());

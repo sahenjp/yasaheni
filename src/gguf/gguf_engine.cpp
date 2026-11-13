@@ -100,38 +100,48 @@ FileKindInfo detect_file_kind(const std::string& path) {
 // ("layers.N.self_attn.q_proj") and hard-gates on qwen3_5's 5120/24/4/256.
 //
 // So the gate below answers "can the legacy Engine's kernels run this shape?",
-// not "is this qwen3_5?". The two constraints that actually bind are:
+// not "is this qwen3_5?". What actually binds:
 //
-//   head_dim  the attention kernels are template-instantiated per head width
-//             and only 128 and 256 exist:
-//               launch_attention_gqa        (src/attention_gqa.cu:171-172)
-//                 -> (G,hd,rd) = (7,128,128) and (6,256,64)
-//               launch_attn_combine_gqa_xform (src/attention_gqa.cu:178-179)
-//               launch_kv_group_quant_g       (src/attention_gqa.cu:184-185)
-//                 -> hd == 128 or hd == 256
-//             and Engine sizes the q16 buffer as Mmax*heads*128
-//             (src/engine.cpp:41), i.e. 128 f16 slots per head is the stride
-//             qkv_post writes with (src/post_kernels.cu:47). A head_dim the
-//             kernels were not instantiated for would either throw at launch or
-//             write past q16, so it is refused here instead.
+//   head_dim  the DEFAULT attention path is not templated at all: qkv_post
+//             writes q16 with a stride of 28 heads x 128 slots
+//             (src/post_kernels.cu:36-47) and the decode attention reads it
+//             back with the same 28 x 128 assumption
+//             (src/attention_kv4q.cu:81). Engine sizes the buffer as
+//             Mmax*heads*128 (src/engine.cpp:41). So the default path only
+//             works when head_dim == 128 AND heads == 28.
+//
+//             The generic path (YSKN_ATTN_GENERIC=1) IS templated and accepts
+//             (G,hd,rd) = (7,128,128) or (6,256,64)
+//             (src/attention_gqa.cu:171-172). We do not gate on it because it
+//             is off by default and switching it on changes numerics.
+//
+//             Measured: a head_dim-256 GGUF passes a looser gate, loads, and
+//             then returns NaN logits and token 2147483647. Refusing it here is
+//             the honest answer; the alternative is a silent wrong result.
+//
+//   heads     must be 28 for the same reason (see above). This is a property of
+//             the shipped model, not of the format, but the kernel is what it
+//             is.
 //
 //   ffn       every layer weight's fan-in is hidden or ffn and the GEMV tiles
 //             are 512 columns wide, so ffn must be a whole number of 512s.
-//
-// KNOWN RESIDUAL: the default (non-YSKN_ATTN_GENERIC) attention path and
-// qkv_post additionally hard-code 28 query heads x 128 and 4 kv heads x 128
-// (src/post_kernels.cu:36-47, src/attention_kv4q.cu:81). A head_dim-256 model
-// passes this gate but will not run on that path; the failure surfaces as the
-// engine's own error at load or first decode rather than as a wrong answer.
 // ---------------------------------------------------------------------------
 bool engine_supports(const ModelConfig& cfg, std::string& reason) {
   std::vector<std::string> bad;
 
-  if (cfg.head_dim != 128 && cfg.head_dim != 256) {
+  if (cfg.head_dim != kernel_shape::kLegacyHeadDim) {
     bad.push_back("head_dim is " + std::to_string(cfg.head_dim) +
-                  ", the attention kernels only instantiate 128 and 256 "
-                  "(src/attention_gqa.cu:171-172) and q16 is sized heads*128 "
-                  "(src/engine.cpp:41)");
+                  ", the default attention path hard-codes " +
+                  std::to_string(kernel_shape::kLegacyHeadDim) +
+                  " slots per head (src/post_kernels.cu:47, src/attention_kv4q.cu:81) "
+                  "and q16 is sized heads*128 (src/engine.cpp:41); a head_dim-256 "
+                  "model loads and then returns NaN logits, so it is refused here");
+  }
+  if (cfg.heads != kernel_shape::kLegacyHeads) {
+    bad.push_back("heads is " + std::to_string(cfg.heads) +
+                  ", the default attention path hard-codes " +
+                  std::to_string(kernel_shape::kLegacyHeads) +
+                  " (src/post_kernels.cu:36-47, src/attention_kv4q.cu:81)");
   }
   if (cfg.ffn <= 0 || cfg.ffn % kernel_shape::kFfnMultiple != 0) {
     bad.push_back("ffn is " + std::to_string(cfg.ffn) + ", the kernels need a multiple of " +

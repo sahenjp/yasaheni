@@ -54,6 +54,14 @@ inline constexpr int kHeads = 24;
 inline constexpr int kKvHeads = 4;
 inline constexpr int kHeadDim = 256;
 inline constexpr int kFfnMultiple = 512;
+
+// What the LEGACY attention path actually requires. It is not templated:
+// src/post_kernels.cu:47 writes q16 with a literal stride of 28 heads x 128
+// slots, and src/attention_kv4q.cu:81 reads it back with the same assumption.
+// These are not the same numbers as the Engine35 constants above -- the legacy
+// kernels were built for a 28-head, head_dim-128 model and never generalised.
+inline constexpr int kLegacyHeads = 28;
+inline constexpr int kLegacyHeadDim = 128;
 }  // namespace kernel_shape
 
 // Can Engine35 run a model with this config *today*? 'reason' is filled either
