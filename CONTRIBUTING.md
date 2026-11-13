@@ -1,39 +1,36 @@
 # Contributing
 
-YASAKANI is a one-person project. Reports, test results and small fixes are welcome; this page says what helps most.
-日本語の issue・プルリクエストも歓迎します。
+This is a fork of [YASAKANI](https://github.com/yasakani-dev/yasakani) that ports the engine to Linux and teaches it to read GGUF. Bug reports, test results and small fixes are welcome.
 
-## Bug reports and test results
+## What is most useful right now
 
-Open an issue and include:
+1. **A run on a GPU other than the RTX 3070 this was developed on.** The library builds for `sm_80/86/89/90/120`; only `sm_86` has actually been executed. If you have an A100, H100, 4090, 5090 or anything else, `scripts/check-env.sh` plus a `cuobjdump --list-elf` of the built library and a note on whether `yskn_open` returns an engine is exactly the report needed.
+2. **A real GGUF file that fails to parse.** The reader was checked against 19 real files and llama.cpp's own dequantizers, but more shapes are always useful. Include the file's metadata (`gguf_dump.py` output or the first 4 KB) rather than the whole file.
+3. **Anything the GGUF name mapper does not cover.** `yskn_gguf_probe` prints a coverage report with `unmatched` and `missing` lists; a model that shows entries there is a concrete bug.
 
-* the output of `yasakani info --model-dir ... --dll ...` (GPU, driver, file sizes). It does not print your user name, but check the command line you
-  paste: a path may contain it. Replace it with `~`;
-* what you ran, what you expected and what happened;
-* for a crash or a wrong result: whether `yasakani selfcheck` passes.
+## Before you send a change
 
-A result from another GPU (RTX 4090, 3090, 5080, ...) is useful even when it says "does not work": give `yasakani info` and the error text.
-Please link large logs and model files instead of pasting them.
+```bash
+scripts/check-env.sh
+scripts/build-linux.sh
+cd tests/gguf && cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure
+python3 -m unittest discover -s python/tests -t python
+```
 
-For a security problem, do not open an issue: see [SECURITY.md](SECURITY.md).
+All four must pass. The C++ tests need no GPU.
 
-## Pull requests
+## What needs its own test results
 
-* Small fixes (documentation, error messages, tests, portability) are welcome.
-* For anything larger (a new feature, another model, a change to the file format or the kernels), open an issue first and say what you want to do.
-  One person cannot always take a large change, and it is better to learn that before you spend the time.
-* The Python package has unit tests that need no GPU (the engine library is replaced by a small stand-in). Run `python -m unittest` in the package
-  folder before you send a change.
-* Keep the scope in mind: Windows 11, RTX 5090, Qwen3.8-27B, one request at a time. A change that adds another platform, GPU or model needs its own
-  test results to be useful.
-* By sending a contribution you agree that it is licensed under the Apache License 2.0 like the rest of the project (see [LICENSE](LICENSE)).
-  Do not send code or data you do not have the right to license that way.
+* **A new GPU architecture.** Add it to `CUDA_ARCH`, build, and show that the kernels run — the two instructions that needed guarding (`griddepcontrol`, `cp.async.bulk.prefetch`) are in `src/pdl.cuh` and are the likely failure point.
+* **A change to the quantization bridge.** `docs/GGUF_NOTES.md` records the measured RMS at each `bits` value; a change that makes those numbers worse needs to say why that is acceptable.
+* **A change to the reader.** The dequantizers are verified bit-identical against llama.cpp's `dequantize_row_*`. Keep it that way or explain the divergence.
 
-## What to expect
+## Style
 
-I try to read everything, but I do this alone, so a reply can take days. I may decline a change that does not fit the project's small scope; that
-is not a judgment of the work.
+* C++17, no dependencies beyond the STL and the vendored nlohmann/json.
+* Comment the non-obvious arithmetic — the trellis window, the warp interleave, the Hadamard scaling. Those are the parts a reader cannot infer.
+* Do not change `--fmad=false`. The numerics were tuned with fused multiply-add contraction disabled.
 
-## Behaviour
+## License
 
-Be kind and be specific. Harassment is not tolerated; I may close issues or block users who ignore this.
+Apache License 2.0, same as upstream. By sending a contribution you agree to license it that way. Do not send code or data you do not have the right to license.
