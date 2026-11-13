@@ -5,8 +5,8 @@ import unittest
 import numpy as np
 
 from tests import support
-from yasakani.runtime import EOS_IDS
-from yasakani.textio import ChatFormatter, OutputStream, StreamDecoder
+from yasaheni.runtime import EOS_IDS
+from yasaheni.textio import ChatFormatter, OutputStream, StreamDecoder
 
 HAVE_TOK = support.tokenizer_dir() is not None
 

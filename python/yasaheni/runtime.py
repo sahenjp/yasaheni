@@ -103,7 +103,7 @@ class RuntimeProfile:
 
 @dataclass
 class ModelPack:
-    """A model folder: weights, drafter, drafter head, KV profile, tokenizer files (and ``yasakani.json`` listing them)."""
+    """A model folder: weights, drafter, drafter head, KV profile, tokenizer files (and ``yasaheni.json`` listing them)."""
     root: Path
     weights: Path
     draft: Path
@@ -122,7 +122,7 @@ class ModelPack:
             raise YasakaniError("model folder not found: %s" % root)
         files = dict(cls.DEFAULT_FILES)
         meta = {}
-        mf = root / "yasakani.json"
+        mf = root / "yasaheni.json"
         if mf.is_file():
             meta = json.loads(mf.read_text(encoding="utf-8"))
             files.update(meta.get("files") or {})
@@ -138,7 +138,7 @@ class ModelPack:
                    model_id=str(meta.get("model_id", "qwen3.8-27b")), sha256=dict(meta.get("sha256") or {}))
 
     def verify(self, progress=None) -> Dict[str, bool]:
-        """Compare the sha256 of every listed file with ``yasakani.json`` (reads ~15 GB: a minute or two)."""
+        """Compare the sha256 of every listed file with ``yasaheni.json`` (reads ~15 GB: a minute or two)."""
         res = {}
         for name, want in sorted(self.sha256.items()):
             p = self.root / name

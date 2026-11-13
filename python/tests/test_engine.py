@@ -8,9 +8,9 @@ from pathlib import Path
 import numpy as np
 
 from tests import support
-from yasakani._native import YasakaniError
-from yasakani.engine import Engine, Sampling
-from yasakani.runtime import EOS_IDS, IM_START
+from yasaheni._native import YasakaniError
+from yasaheni.engine import Engine, Sampling
+from yasaheni.runtime import EOS_IDS, IM_START
 
 EOS = EOS_IDS[0]
 
@@ -156,14 +156,14 @@ class EngineTests(unittest.TestCase):
         root = Path(self.tmp.name) / "bad"
         support.make_pack(Path(self.tmp.name), "bad")
         (root / "bdraft2_k8.yskn").rename(root / "bdraft_bad.yskn")
-        (root / "yasakani.json").write_text('{"files": {"draft": "bdraft_bad.yskn"}}')
-        from yasakani.runtime import ModelPack
+        (root / "yasaheni.json").write_text('{"files": {"draft": "bdraft_bad.yskn"}}')
+        from yasaheni.runtime import ModelPack
         with self.assertRaisesRegex(YasakaniError, "bad container"):
             Engine(ModelPack.load(root), max_ctx=4096, lib=self.stub.lib)
 
     def test_plain_paths_do_not_touch_the_locale(self):
         import sys
-        from yasakani.engine import _narrow_paths_as_utf8
+        from yasaheni.engine import _narrow_paths_as_utf8
         self.assertFalse(_narrow_paths_as_utf8(["C:/models/qwen/x.yskn", "D:\\a b\\c.bin"]))
         if sys.platform != "win32":                                  # the switch exists for Windows only
             self.assertFalse(_narrow_paths_as_utf8(["/tmp/\u30e2\u30c7\u30eb/x.yskn"]))

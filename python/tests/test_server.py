@@ -9,10 +9,10 @@ import unittest
 from pathlib import Path
 
 from tests import support
-from yasakani.chat import ChatRunner
-from yasakani.runtime import EOS_IDS
-from yasakani.server import ApiState, ServerConfig, bind
-from yasakani.textio import ChatFormatter
+from yasaheni.chat import ChatRunner
+from yasaheni.runtime import EOS_IDS
+from yasaheni.server import ApiState, ServerConfig, bind
+from yasaheni.textio import ChatFormatter
 
 EOS = EOS_IDS[0]
 HAVE_TOK = support.tokenizer_dir() is not None
@@ -187,7 +187,7 @@ class ServerTests(unittest.TestCase):
         orig = self.state.runner.engine.generate
 
         def failing(*a, **k):
-            from yasakani._native import YasakaniError
+            from yasaheni._native import YasakaniError
             raise YasakaniError("CUDA error: something")
         self.state.runner.engine.generate = failing
         status, d = self.chat()

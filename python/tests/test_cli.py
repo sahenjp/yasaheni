@@ -23,7 +23,7 @@ def run_cli(*args, input_text=None, timeout=60):
     env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONUNBUFFERED="1")
     env.pop("YASAKANI_DLL", None)
     env.pop("YASAKANI_MODEL_DIR", None)
-    return subprocess.run([sys.executable, "-m", "yasakani", *args], input=input_text, capture_output=True, text=True,
+    return subprocess.run([sys.executable, "-m", "yasaheni", *args], input=input_text, capture_output=True, text=True,
                           timeout=timeout, cwd=str(ROOT), env=env)
 
 
@@ -44,7 +44,7 @@ class CliTests(unittest.TestCase):
     def test_help_and_version(self):
         r = run_cli("--version")
         self.assertEqual(r.returncode, 0)
-        self.assertIn("yasakani", r.stdout)
+        self.assertIn("yasaheni", r.stdout)
         r = run_cli("serve", "--help")
         self.assertIn("--port", r.stdout)
         r = run_cli()
@@ -66,7 +66,7 @@ class CliTests(unittest.TestCase):
         d = self.folder.parent / "verify"
         shutil.copytree(self.folder, d, dirs_exist_ok=True)
         sums = {n: hashlib.sha256((d / n).read_bytes()).hexdigest() for n in ("bdraft2_k8.yskn", "kvq_u5.bin")}
-        (d / "yasakani.json").write_text(json.dumps({"sha256": sums}), encoding="utf-8")
+        (d / "yasaheni.json").write_text(json.dumps({"sha256": sums}), encoding="utf-8")
         r = run_cli("verify", "--model-dir", str(d))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("all files match", r.stdout)
@@ -74,7 +74,7 @@ class CliTests(unittest.TestCase):
         r = run_cli("verify", "--model-dir", str(d))
         self.assertEqual(r.returncode, 1)
         self.assertIn("DIFFERENT", r.stdout)
-        (d / "yasakani.json").unlink()
+        (d / "yasaheni.json").unlink()
         r = run_cli("verify", "--model-dir", str(d))
         self.assertEqual(r.returncode, 2)
 
@@ -131,7 +131,7 @@ class CliTests(unittest.TestCase):
 
     def test_gpu_memory_warning(self):
         from unittest import mock
-        from yasakani import cli
+        from yasaheni import cli
 
         def smi(text):
             return mock.patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout=text, stderr=""))
@@ -175,7 +175,7 @@ class CliTests(unittest.TestCase):
         port = free_port()
         env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONUNBUFFERED="1", YSKN_STALE_SETTING="1")
         env.pop("YASAKANI_DLL", None)
-        proc = subprocess.Popen([sys.executable, "-m", "yasakani", "serve", "--model-dir", str(self.folder), "--dll", self.dll, "--port", str(port),
+        proc = subprocess.Popen([sys.executable, "-m", "yasaheni", "serve", "--model-dir", str(self.folder), "--dll", self.dll, "--port", str(port),
                                  "--max-ctx", "4096", "--api-key", "k3y"], cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             base = "http://127.0.0.1:%d" % port

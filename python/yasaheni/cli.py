@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 the YASAKANI authors
-"""Command line:  ``python -m yasakani  info | serve | chat | bench | verify``  (``yasakani`` when installed with pip)."""
+"""Command line:  ``python -m yasaheni  info | serve | chat | bench | verify``  (``yasaheni`` when installed with pip)."""
 from __future__ import annotations
 
 import argparse
@@ -136,7 +136,7 @@ def _open_stack(args, *, warm: bool = True):
 # ---- info -------------------------------------------------------------------------------------------------------------------------
 def cmd_info(args) -> int:
     ok = True
-    print("yasakani", __version__)
+    print("yasaheni", __version__)
     print("python  ", platform.python_version(), platform.system(), platform.machine())
     for mod in ("numpy", "tokenizers", "jinja2"):
         try:
@@ -161,7 +161,7 @@ def cmd_info(args) -> int:
             print("model    %s  (id %s, context up to %d tokens)" % (pack.root.name, pack.model_id, pack.max_ctx))
             for label, p in (("weights", pack.weights), ("draft", pack.draft), ("draft head", pack.draft_head), ("kv profile", pack.kv_profile)):
                 print("  %-10s %-26s %s" % (label, p.name, _human(p.stat().st_size)))
-            print("  checksums  %s" % ("%d files listed in yasakani.json" % len(pack.sha256) if pack.sha256 else "none listed (yasakani.json missing)"))
+            print("  checksums  %s" % ("%d files listed in yasaheni.json" % len(pack.sha256) if pack.sha256 else "none listed (yasaheni.json missing)"))
             from .textio import ChatFormatter
             ChatFormatter(pack.root)
             print("  tokenizer  ok (chat template found)")
@@ -177,7 +177,7 @@ def cmd_info(args) -> int:
 def cmd_verify(args) -> int:
     pack = ModelPack.load(_model_dir(args))
     if not pack.sha256:
-        print("no checksums are listed for this folder (yasakani.json missing or without \"sha256\").")
+        print("no checksums are listed for this folder (yasaheni.json missing or without \"sha256\").")
         return 2
     print("checking %d files (reads about %s, one to two minutes) ..." % (len(pack.sha256), _human(sum((pack.root / n).stat().st_size for n in pack.sha256 if (pack.root / n).is_file()))))
     res = pack.verify(progress=lambda n, ok: print("  %-30s %s" % (n, "OK" if ok else "DIFFERENT"), flush=True))
@@ -216,7 +216,7 @@ def cmd_serve(args) -> int:
                             % (args.host, args.port, ex.strerror or type(ex).__name__))
     cfg.port = httpd.server_address[1]
     _stop_on_signals()
-    threading.Thread(target=httpd.serve_forever, kwargs=dict(poll_interval=0.2), name="yasakani-http", daemon=True).start()
+    threading.Thread(target=httpd.serve_forever, kwargs=dict(poll_interval=0.2), name="yasaheni-http", daemon=True).start()
     base = "http://%s:%d" % ("[%s]" % args.host if ":" in args.host else args.host, cfg.port)
     _say("listening on %s  (answers /health while the model loads)" % base)
     eng = None
@@ -445,7 +445,7 @@ def cmd_selfcheck(args) -> int:
     finally:
         eng.close()
     if args.write:
-        Path(args.write).write_text(json.dumps(dict(format=SELFCHECK_FORMAT, model_id=pack.model_id, yasakani=__version__, cases=got), indent=1) + "\n",
+        Path(args.write).write_text(json.dumps(dict(format=SELFCHECK_FORMAT, model_id=pack.model_id, yasaheni=__version__, cases=got), indent=1) + "\n",
                                     encoding="utf-8")
         print("wrote %d reference record(s) to %s" % (len(got), args.write))
         return 0
@@ -479,9 +479,9 @@ def cmd_selfcheck(args) -> int:
 
 # ---- entry point ------------------------------------------------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="yasakani", description="Run Qwen3.8-27B locally on one RTX 5090 (Windows or Linux) with the "
+    ap = argparse.ArgumentParser(prog="yasaheni", description="Run Qwen3.8-27B locally on one RTX 5090 (Windows or Linux) with the "
                                                                "YASAKANI engine.")
-    ap.add_argument("--version", action="version", version="yasakani " + __version__)
+    ap.add_argument("--version", action="version", version="yasaheni " + __version__)
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="{info,serve,chat,bench,selfcheck,verify}")
 
     sp = sub.add_parser("info", help="check this computer, the engine library and (with --model-dir) a model folder")
@@ -489,7 +489,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dll")
     sp.set_defaults(func=cmd_info)
 
-    sp = sub.add_parser("verify", help="check the model files against the checksums listed in yasakani.json")
+    sp = sub.add_parser("verify", help="check the model files against the checksums listed in yasaheni.json")
     sp.add_argument("--model-dir")
     sp.set_defaults(func=cmd_verify)
 

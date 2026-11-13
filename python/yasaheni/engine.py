@@ -232,7 +232,7 @@ class Engine:
                 except BaseException as ex:                          # noqa: BLE001
                     box["exc"] = ex
 
-            th = threading.Thread(target=work, name="yasakani-generate", daemon=True)
+            th = threading.Thread(target=work, name="yasaheni-generate", daemon=True)
             th.start()
             seen = 0
             failure: Optional[BaseException] = None

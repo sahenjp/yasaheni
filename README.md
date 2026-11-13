@@ -1,4 +1,4 @@
-# yasakani-sahen
+# yasaheni
 
 A Linux port of the [YASAKANI](https://github.com/yasakani-dev/yasakani) local LLM engine. Upstream runs on Windows with one RTX 5090 and reads only its own `YSKN` container. This fork runs on Linux across several GPU generations and reads GGUF directly.
 

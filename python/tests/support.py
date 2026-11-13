@@ -14,9 +14,9 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-from yasakani._native import NativeLib          # noqa: E402
-from yasakani.engine import Engine               # noqa: E402
-from yasakani.runtime import ModelPack           # noqa: E402
+from yasaheni._native import NativeLib          # noqa: E402
+from yasaheni.engine import Engine               # noqa: E402
+from yasaheni.runtime import ModelPack           # noqa: E402
 
 _BUILD = {}
 

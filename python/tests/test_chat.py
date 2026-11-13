@@ -6,10 +6,10 @@ from pathlib import Path
 import numpy as np
 
 from tests import support
-from yasakani import loopguard
-from yasakani.chat import ChatParams, ChatRunner, RequestError, StopFilter, clean_messages
-from yasakani.runtime import EOS_IDS
-from yasakani.textio import ChatFormatter
+from yasaheni import loopguard
+from yasaheni.chat import ChatParams, ChatRunner, RequestError, StopFilter, clean_messages
+from yasaheni.runtime import EOS_IDS
+from yasaheni.textio import ChatFormatter
 
 EOS = EOS_IDS[0]
 HAVE_TOK = support.tokenizer_dir() is not None

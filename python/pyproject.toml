@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "yasakani"
+name = "yasaheni"
 dynamic = ["version"]
-description = "Run Qwen3.8-27B locally on one RTX 5090 (Windows) with the YASAKANI engine: OpenAI-compatible server, terminal chat, benchmark and self-check."
+description = "Run Qwen3.8-27B locally with the YASAKANI engine: OpenAI-compatible server, terminal chat, benchmark and self-check."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -19,10 +19,10 @@ classifiers = [
 ]
 
 [project.scripts]
-yasakani = "yasakani.cli:main"
+yasaheni = "yasaheni.cli:main"
 
 [tool.setuptools]
-packages = ["yasakani"]
+packages = ["yasaheni"]
 
 [tool.setuptools.dynamic]
-version = { attr = "yasakani.__version__" }
+version = { attr = "yasaheni.__version__" }
