@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yasakani/yasakani/bench/schema.json",
+  "title": "YASAKANI bench result",
+  "description": "One file per measured engine and setting, written by bench/bench.py and read by bench/compare.py. The speed of a run is (completion_tokens - 1) / (gen_ms / 1000): the time from the first to the last chunk that carried text, with the prompt reading excluded. See bench/README.md.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "engine",
+    "model",
+    "base_url",
+    "started_at",
+    "max_tokens",
+    "prompts",
+    "tasks",
+    "gpu",
+    "runs",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Format version. compare.py refuses a file it does not know."
+    },
+    "engine": {
+      "type": "string",
+      "description": "Name of the engine, as it should appear in the comparison table (for example yasakani, vllm, llama.cpp)."
+    },
+    "model": {
+      "type": "string",
+      "description": "Model id sent in the request body."
+    },
+    "base_url": {
+      "type": "string",
+      "description": "OpenAI-compatible base URL that was driven, for example http://127.0.0.1:8000/v1."
+    },
+    "started_at": {
+      "type": "string",
+      "description": "Local time when the first request was sent, ISO 8601 with an offset."
+    },
+    "max_tokens": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Answer limit of every run. compare.py refuses to mix files with different values."
+    },
+    "settings": {
+      "type": "object",
+      "description": "Sampling settings as sent. null means the field was not sent at all.",
+      "properties": {
+        "temperature": {"type": ["number", "null"]},
+        "top_p": {"type": ["number", "null"]},
+        "top_k": {"type": ["integer", "null"]},
+        "seed": {"type": ["integer", "null"]},
+        "runs": {"type": "integer", "minimum": 1}
+      }
+    },
+    "prompts": {
+      "type": "object",
+      "description": "Task name to SHA-256 of the prompt file. This is the prompt-set fingerprint: compare.py refuses to mix files whose fingerprints differ.",
+      "additionalProperties": {"type": "string"}
+    },
+    "tasks": {
+      "type": "array",
+      "description": "Task names in the order they were run.",
+      "items": {"type": "string"}
+    },
+    "gpu": {
+      "type": "object",
+      "description": "What nvidia-smi said when the run started. Empty strings and nulls when it was not available.",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string"},
+        "driver": {"type": ["string", "null"]},
+        "memory_total_mib": {"type": ["number", "null"]},
+        "power_limit_w": {"type": ["number", "null"]},
+        "note": {"type": "string"}
+      }
+    },
+    "runs": {
+      "type": "array",
+      "description": "One entry per request, in the order they were sent.",
+      "items": {
+        "type": "object",
+        "required": [
+          "task",
+          "run",
+          "prompt_tokens",
+          "completion_tokens",
+          "ttft_ms",
+          "gen_ms",
+          "tok_per_s",
+          "finish_reason",
+          "flags"
+        ],
+        "properties": {
+          "task": {"type": "string"},
+          "run": {"type": "integer", "minimum": 0},
+          "prompt_tokens": {"type": "integer", "minimum": 0},
+          "completion_tokens": {"type": "integer", "minimum": 0},
+          "ttft_ms": {"type": "number", "minimum": 0, "description": "Time from sending the request to the first chunk that carried text."},
+          "gen_ms": {"type": "number", "minimum": 0, "description": "Time from the first to the last chunk that carried text."},
+          "tok_per_s": {"type": "number", "minimum": 0, "description": "(completion_tokens - 1) / (gen_ms / 1000)."},
+          "prefill_tok_per_s": {"type": "number", "minimum": 0, "description": "prompt_tokens / (ttft_ms / 1000)."},
+          "wall_ms": {"type": "number", "minimum": 0, "description": "Time from sending the request to the end of the stream, prompt reading included."},
+          "finish_reason": {"type": ["string", "null"], "description": "stop, length, tool_calls, or null when the server sent none."},
+          "flags": {
+            "type": "array",
+            "description": "Reasons this run must not be averaged in. Empty when the run is clean.",
+            "items": {"enum": ["loop", "tool_calls", "no_usage", "empty"]}
+          },
+          "loop_period": {"type": ["integer", "null"], "description": "Length in characters of the repeated unit when flags contains loop."},
+          "loop_tail": {"type": "string", "description": "Last characters of the text of a run flagged loop, for a human to look at."}
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["per_task"],
+      "properties": {
+        "per_task": {
+          "type": "object",
+          "description": "Task name to its tally over the runs that were not flagged.",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["mean", "min", "max", "n_used", "n_excluded"],
+            "properties": {
+              "mean": {"type": "number", "minimum": 0},
+              "min": {"type": "number", "minimum": 0},
+              "max": {"type": "number", "minimum": 0},
+              "n_used": {"type": "integer", "minimum": 0},
+              "n_excluded": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      }
+    }
+  }
+}

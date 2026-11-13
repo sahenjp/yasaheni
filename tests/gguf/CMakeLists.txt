@@ -58,6 +58,46 @@ else()
   target_compile_options(gguf_model_test PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# --- engine wiring test -----------------------------------------------------
+# gguf_engine_test links the reader, the adapter and the bridge. It also exercises
+# the C ABI (yskn_gguf_probe), so it needs the repo's include/ directory for
+# yskn_abi.h and third_party/ for nlohmann/json.hpp.
+add_executable(gguf_engine_test
+  gguf_engine_test.cpp
+  ${YSKN_GGUF_SRC}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_model.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_map.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_engine.cpp
+)
+
+target_include_directories(gguf_engine_test PRIVATE
+  ${YSKN_GGUF_INCLUDE}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party
+)
+
+if(MSVC)
+  target_compile_options(gguf_engine_test PRIVATE /W4 /utf-8)
+else()
+  target_compile_options(gguf_engine_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# --- quantiser / encoder test -----------------------------------------------
+# The GGUF -> engine tensor bridge: rotation, codebook training, Viterbi and the
+# layout:"warp" interleave. Host only -- no CUDA, no GGUF fixture, no GPU.
+add_executable(gguf_quant_test
+  gguf_quant_test.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_quant.cpp
+)
+
+target_include_directories(gguf_quant_test PRIVATE ${YSKN_GGUF_INCLUDE})
+
+if(MSVC)
+  target_compile_options(gguf_quant_test PRIVATE /W4 /utf-8)
+else()
+  target_compile_options(gguf_quant_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 # --- fixture generation -----------------------------------------------------
 # make_fixture.py writes <out>.gguf plus a <out>.json sidecar of expected
 # values. It runs at build time so the binary always tests a fresh fixture.
@@ -122,6 +162,7 @@ add_custom_command(
 
 add_custom_target(gguf_model_fixture ALL DEPENDS ${GGUF_MODEL_FIXTURES})
 add_dependencies(gguf_model_test gguf_model_fixture)
+add_dependencies(gguf_engine_test gguf_model_fixture)
 
 # --- ctest ------------------------------------------------------------------
 enable_testing()
@@ -132,8 +173,20 @@ add_test(NAME gguf_reader
           --out-dir ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+add_test(NAME gguf_quant
+  COMMAND gguf_quant_test
+)
+
 add_test(NAME gguf_model_adapter
   COMMAND gguf_model_test
+          --good ${CMAKE_CURRENT_BINARY_DIR}/fixture/gguf_model.gguf
+          --broken ${CMAKE_CURRENT_BINARY_DIR}/fixture/gguf_model_broken.gguf
+          --unknown ${CMAKE_CURRENT_BINARY_DIR}/fixture/gguf_model_unknown.gguf
+          --out-dir ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+add_test(NAME gguf_engine_wiring
+  COMMAND gguf_engine_test
           --good ${CMAKE_CURRENT_BINARY_DIR}/fixture/gguf_model.gguf
           --broken ${CMAKE_CURRENT_BINARY_DIR}/fixture/gguf_model_broken.gguf
           --unknown ${CMAKE_CURRENT_BINARY_DIR}/fixture/gguf_model_unknown.gguf

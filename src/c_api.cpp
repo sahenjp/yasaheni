@@ -5,6 +5,7 @@
 #include "specx.hpp"
 #include <chrono>
 #include "yskn_abi.h"
+#include "gguf/gguf_engine.hpp"
 #include <string>
 #include <atomic>
 namespace yskn { extern std::atomic<int> g_specx_cancel; }   
@@ -12,7 +13,33 @@ static thread_local std::string g_err;
 struct yskn_engine { yskn::Engine* e; yskn::Engine35* q; std::atomic<int> cancel{0}; };   
 static yskn::Engine& E(yskn_engine* e) { if (!e->e) throw std::runtime_error("this API is not available for the qwen3_5 engine yet"); return *e->e; }
 #define YSKN_TRY(body) try { body; return 0; } catch (const std::exception& ex) { g_err = ex.what(); return -1; }
+// Route on the first four bytes. "YSKN" keeps the original path untouched;
+// "GGUF" is inspected and refused with a reason (no GGUF weights are consumed
+// yet); anything else is named explicitly so a user is not left guessing which
+// of the two formats the file was meant to be. A file that cannot be read at
+// all falls through to the original code so its error message is unchanged.
 extern "C" yskn_engine* yskn_open(const char* path, int max_ctx, int device, int flags) {
+  if (path) {
+    const yskn::gguf::FileKindInfo kind = yskn::gguf::detect_file_kind(path);
+    if (kind.kind == yskn::gguf::FileKind::Gguf) {
+      const yskn::gguf::ProbeResult r = yskn::gguf::probe(path);
+      if (!r.ok) {
+        g_err = "cannot use GGUF file '" + std::string(path) + "': " + r.error +
+                "; use yskn_gguf_probe to inspect it";
+      } else if (r.supported) {
+        g_err = "GGUF models are not runnable yet: " + r.reason +
+                "; use yskn_gguf_probe to inspect";
+      } else {
+        g_err = "GGUF model '" + std::string(path) + "' is not supported by this build: " +
+                r.reason + "; use yskn_gguf_probe to inspect";
+      }
+      return nullptr;
+    }
+    if (kind.readable && kind.kind == yskn::gguf::FileKind::Unknown) {
+      g_err = kind.error;  // names both formats and the bytes that were found
+      return nullptr;
+    }
+  }
   try { cudaSetDevice(device); std::string arch; { yskn::Container c; c.open(path); arch = c.model.arch; }
     if (arch == "qwen3_5") return new yskn_engine{nullptr, new yskn::Engine35(path, max_ctx, flags)};
     return new yskn_engine{new yskn::Engine(path, max_ctx, flags), nullptr}; } catch (const std::exception& ex) { g_err = ex.what(); return nullptr; }

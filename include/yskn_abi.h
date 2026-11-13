@@ -22,6 +22,11 @@ typedef struct yskn_engine yskn_engine;
  
 YSKN_API yskn_engine* yskn_open(const char* yskn_path, int max_ctx, int device, int flags);
 YSKN_API void          yskn_close(yskn_engine* e);
+// Inspect a .gguf file without loading it. Writes a JSON report into out_json
+// (NUL terminated) and returns 0 when the file was parsed as GGUF, non-zero
+// otherwise -- the report is still written, with "error" filled in, so a caller
+// can always explain the failure. Needs out_cap >= strlen(report) + 1.
+YSKN_API int           yskn_gguf_probe(const char* path, char* out_json, int out_cap);
 YSKN_API int           yskn_reset(yskn_engine* e);                                        
 YSKN_API int           yskn_prefill(yskn_engine* e, const int32_t* ids, int n, int32_t* first_pred);  
 

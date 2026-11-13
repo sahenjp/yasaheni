@@ -42,6 +42,12 @@ add_library(yskn SHARED
   src/engine35.cpp
   src/gemm_compressed.cu
   src/gemv_sigma_int.cu
+  # GGUF bridge. gguf_engine.cpp is the new wiring; it needs the reader and the
+  # adapter next to it, or --no-undefined rejects the link.
+  src/gguf/gguf.cpp
+  src/gguf/gguf_map.cpp
+  src/gguf/gguf_model.cpp
+  src/gguf/gguf_engine.cpp
   src/kvx_probe.cu
   src/lnord.cu
   src/loader.cpp
