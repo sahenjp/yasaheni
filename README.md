@@ -16,7 +16,7 @@ Apache License 2.0, same as upstream. The engine kernels are the work of the YAS
 | GGUF v2/v3 reader | works; 16 ggml types dequantized, verified bit-identical against llama.cpp |
 | GGUF model adapter (config, name mapping, validation) | works; 377 checks |
 | GGUF to engine tensor quantization | works; Viterbi verified optimal, 84 checks |
-| Running a GGUF model end to end | not yet; the 27B kernels are shape-specialised |
+| Running a GGUF model end to end | works; a GGUF opens, prefills, decodes and returns logits through the legacy Engine |
 
 ## Build
 
@@ -46,6 +46,8 @@ Both are now behind `__CUDA_ARCH__` guards (`src/pdl.cuh`), and the host-side la
 `src/gguf/` reads GGUF v2/v3: header, every metadata value type including nested arrays, tensor infos, alignment, and an `mmap`'d data section. Dequantization covers F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K and IQ4_NL.
 
 The dequantizers were checked three ways: against `dequantize_row_*` lifted from llama.cpp's `ggml-quants.c` (bit-identical on all 12 quantized types), against the official `gguf` Python package on 19 real GGUF files (including a full 151,936-token Qwen2 vocabulary), and by mutation and fuzz testing.
+
+A GGUF file is loaded by the legacy `Engine` path, which reads every dimension from the file metadata, so it is shape-parametric. The 27B `Engine35` path still needs its own conversion. What the gate checks is what the templated kernels can actually run: `head_dim` must be 128 or 256 (the attention kernels are instantiated per head width, `src/attention_gqa.cu:171-172`) and `ffn` must be a multiple of 512. Anything else is refused with a message naming the field and the value.
 
 `docs/GGUF_DESIGN.md` documents the `YSKN` container the engine was built around, and what a converter from GGUF to that format would need. `docs/GGUF_NOTES.md` records the measured behaviour of the quantization bridge: the trellis bound, the codebook refinement gains, and the bugs the round-trip oracle caught.
 

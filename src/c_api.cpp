@@ -13,11 +13,23 @@ static thread_local std::string g_err;
 struct yskn_engine { yskn::Engine* e; yskn::Engine35* q; std::atomic<int> cancel{0}; };   
 static yskn::Engine& E(yskn_engine* e) { if (!e->e) throw std::runtime_error("this API is not available for the qwen3_5 engine yet"); return *e->e; }
 #define YSKN_TRY(body) try { body; return 0; } catch (const std::exception& ex) { g_err = ex.what(); return -1; }
-// Route on the first four bytes. "YSKN" keeps the original path untouched;
-// "GGUF" is inspected and refused with a reason (no GGUF weights are consumed
-// yet); anything else is named explicitly so a user is not left guessing which
-// of the two formats the file was meant to be. A file that cannot be read at
-// all falls through to the original code so its error message is unchanged.
+// Route on the first four bytes. "YSKN" keeps the original path untouched.
+//
+// "GGUF" is probed first, and the probe's answer decides:
+//   probe failed          -> name the parse error
+//   supported == false    -> refuse with the gate's reason (probe-only, no load)
+//   supported == true     -> construct the LEGACY Engine on the GGUF path.
+//                            Model::load peeks the magic, opens the
+//                            GgufContainer (which quantises every weight into
+//                            the in-memory image the loader reads) and uploads
+//                            it exactly as it does for a YSKN container.
+//                            Engine35 is never used for a GGUF: its tensor
+//                            vocabulary and its 5120/24/4/256 shape gate are
+//                            qwen3_5-specific.
+//
+// Anything else is named explicitly so a user is not left guessing which of the
+// two formats the file was meant to be. A file that cannot be read at all falls
+// through to the original code so its error message is unchanged.
 extern "C" yskn_engine* yskn_open(const char* path, int max_ctx, int device, int flags) {
   if (path) {
     const yskn::gguf::FileKindInfo kind = yskn::gguf::detect_file_kind(path);
@@ -26,14 +38,23 @@ extern "C" yskn_engine* yskn_open(const char* path, int max_ctx, int device, int
       if (!r.ok) {
         g_err = "cannot use GGUF file '" + std::string(path) + "': " + r.error +
                 "; use yskn_gguf_probe to inspect it";
-      } else if (r.supported) {
-        g_err = "GGUF models are not runnable yet: " + r.reason +
-                "; use yskn_gguf_probe to inspect";
-      } else {
+        return nullptr;
+      }
+      if (!r.supported) {
         g_err = "GGUF model '" + std::string(path) + "' is not supported by this build: " +
                 r.reason + "; use yskn_gguf_probe to inspect";
+        return nullptr;
       }
-      return nullptr;
+      // Supported: hand the path to the legacy Engine. A failure here (a shape
+      // GgufContainer cannot materialise, or a kernel constraint the gate does
+      // not model) comes back as the engine's own message, not a probe error.
+      try {
+        cudaSetDevice(device);
+        return new yskn_engine{new yskn::Engine(path, max_ctx, flags), nullptr};
+      } catch (const std::exception& ex) {
+        g_err = "cannot load GGUF model '" + std::string(path) + "': " + ex.what();
+        return nullptr;
+      }
     }
     if (kind.readable && kind.kind == yskn::gguf::FileKind::Unknown) {
       g_err = kind.error;  // names both formats and the bytes that were found

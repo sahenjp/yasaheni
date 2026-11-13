@@ -93,29 +93,45 @@ FileKindInfo detect_file_kind(const std::string& path) {
 
 // ---------------------------------------------------------------------------
 // The support gate
+//
+// A GGUF is loaded by the LEGACY Engine (src/engine.cpp), not Engine35. That is
+// the whole point of GgufContainer: it emits the flat "layers.N.q_proj" tensor
+// vocabulary Model::load asks for, and Engine35 speaks a different one
+// ("layers.N.self_attn.q_proj") and hard-gates on qwen3_5's 5120/24/4/256.
+//
+// So the gate below answers "can the legacy Engine's kernels run this shape?",
+// not "is this qwen3_5?". The two constraints that actually bind are:
+//
+//   head_dim  the attention kernels are template-instantiated per head width
+//             and only 128 and 256 exist:
+//               launch_attention_gqa        (src/attention_gqa.cu:171-172)
+//                 -> (G,hd,rd) = (7,128,128) and (6,256,64)
+//               launch_attn_combine_gqa_xform (src/attention_gqa.cu:178-179)
+//               launch_kv_group_quant_g       (src/attention_gqa.cu:184-185)
+//                 -> hd == 128 or hd == 256
+//             and Engine sizes the q16 buffer as Mmax*heads*128
+//             (src/engine.cpp:41), i.e. 128 f16 slots per head is the stride
+//             qkv_post writes with (src/post_kernels.cu:47). A head_dim the
+//             kernels were not instantiated for would either throw at launch or
+//             write past q16, so it is refused here instead.
+//
+//   ffn       every layer weight's fan-in is hidden or ffn and the GEMV tiles
+//             are 512 columns wide, so ffn must be a whole number of 512s.
+//
+// KNOWN RESIDUAL: the default (non-YSKN_ATTN_GENERIC) attention path and
+// qkv_post additionally hard-code 28 query heads x 128 and 4 kv heads x 128
+// (src/post_kernels.cu:36-47, src/attention_kv4q.cu:81). A head_dim-256 model
+// passes this gate but will not run on that path; the failure surfaces as the
+// engine's own error at load or first decode rather than as a wrong answer.
 // ---------------------------------------------------------------------------
 bool engine_supports(const ModelConfig& cfg, std::string& reason) {
   std::vector<std::string> bad;
 
-  if (cfg.arch != kernel_shape::kArch) {
-    bad.push_back("arch is \"" + (cfg.arch.empty() ? std::string("(missing)") : cfg.arch) +
-                  "\", the engine needs \"" + std::string(kernel_shape::kArch) + "\"");
-  }
-  if (cfg.hidden != kernel_shape::kHidden) {
-    bad.push_back("hidden is " + std::to_string(cfg.hidden) +
-                  ", the kernels are built for " + std::to_string(kernel_shape::kHidden));
-  }
-  if (cfg.heads != kernel_shape::kHeads) {
-    bad.push_back("heads is " + std::to_string(cfg.heads) +
-                  ", the kernels are built for " + std::to_string(kernel_shape::kHeads));
-  }
-  if (cfg.kv_heads != kernel_shape::kKvHeads) {
-    bad.push_back("kv_heads is " + std::to_string(cfg.kv_heads) +
-                  ", the kernels are built for " + std::to_string(kernel_shape::kKvHeads));
-  }
-  if (cfg.head_dim != kernel_shape::kHeadDim) {
+  if (cfg.head_dim != 128 && cfg.head_dim != 256) {
     bad.push_back("head_dim is " + std::to_string(cfg.head_dim) +
-                  ", the kernels are built for " + std::to_string(kernel_shape::kHeadDim));
+                  ", the attention kernels only instantiate 128 and 256 "
+                  "(src/attention_gqa.cu:171-172) and q16 is sized heads*128 "
+                  "(src/engine.cpp:41)");
   }
   if (cfg.ffn <= 0 || cfg.ffn % kernel_shape::kFfnMultiple != 0) {
     bad.push_back("ffn is " + std::to_string(cfg.ffn) + ", the kernels need a multiple of " +
@@ -127,11 +143,20 @@ bool engine_supports(const ModelConfig& cfg, std::string& reason) {
     return false;
   }
 
-  // The shape gate passes, but nothing consumes GGUF weights yet: Engine35
-  // still loads a Container. Say so instead of implying the file would run.
+  // The kernel constraints are met, so yskn_open loads this file through the
+  // legacy Engine instead of refusing it. GgufContainer still has to be able to
+  // turn it into a loadable image (hidden and ffn a multiple of the 256-column
+  // trellis sequence, every tensor Model::load asks for present, every weight a
+  // dequantizable type); that check lives in GgufContainer::validate_shape()
+  // because it needs the file, probe() reports it separately as validation, and
+  // yskn_open surfaces whatever it throws. The reason therefore states what was
+  // satisfied rather than what is missing.
   reason =
-      "the shape matches the compiled kernels, but GGUF weights are not wired into "
-      "Engine35 yet (it still reads YSKN containers)";
+      "the legacy Engine's kernel constraints are met (head_dim " +
+      std::to_string(cfg.head_dim) + " is instantiated, ffn " +
+      std::to_string(cfg.ffn) + " is a multiple of " +
+      std::to_string(kernel_shape::kFfnMultiple) +
+      "), so yskn_open loads it through src/loader.cpp Model::load";
   return true;
 }
 

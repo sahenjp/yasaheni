@@ -266,3 +266,78 @@ add_test(NAME gguf_container
           --tie ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_tie.gguf
           --nobias ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny_nobias.gguf
 )
+
+# --- GGUF -> Model::load dispatch test --------------------------------------
+# gguf_load_test checks the last wiring slice: Model::open_backing() picks the
+# Container or the GgufContainer from the magic, cfg follows the live one, and
+# T()/V()/at<>() (src/model.hpp) resolve the same names either way.
+#
+# No CUDA *link* is needed: open_backing() and the three accessors are all
+# inline in src/model.hpp, and the test never calls Model::load() (whose upload
+# half is the only thing that touches cudaMalloc). The CUDA toolkit has to be on
+# the include path because model.hpp -> kernels.hpp/post_kernels.hpp include
+# <cuda_runtime.h>, but the binary links nothing from it.
+#
+# Fixtures: tiny.gguf (head_dim 64, from tools/make_tiny_gguf.py) for the
+# dispatch checks, plus a head_dim-128 and a head_dim-64 pair for the gate.
+find_package(CUDAToolkit)
+if(NOT CUDAToolkit_FOUND)
+  message(WARNING "CUDA toolkit not found: skipping gguf_load_test")
+else()
+  add_executable(gguf_load_test
+    gguf_load_test.cpp
+    ${YSKN_GGUF_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_model.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_map.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_quant.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_container.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gguf/gguf_engine.cpp
+  )
+
+  target_include_directories(gguf_load_test PRIVATE
+    ${YSKN_GGUF_INCLUDE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party
+    ${CUDAToolkit_INCLUDE_DIRS}
+  )
+
+  if(MSVC)
+    target_compile_options(gguf_load_test PRIVATE /W4 /utf-8)
+  else()
+    target_compile_options(gguf_load_test PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+
+  # The gate fixtures: head_dim 128 (accepted) and head_dim 64 (rejected).
+  set(GGUF_LOAD_HD128 ${CMAKE_CURRENT_BINARY_DIR}/fixture/load_hd128.gguf)
+  set(GGUF_LOAD_HD64 ${CMAKE_CURRENT_BINARY_DIR}/fixture/load_hd64.gguf)
+
+  add_custom_command(
+    OUTPUT ${GGUF_LOAD_HD128} ${GGUF_LOAD_HD128}.json
+           ${GGUF_LOAD_HD64} ${GGUF_LOAD_HD64}.json
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/fixture
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/make_tiny_gguf.py
+            --out ${GGUF_LOAD_HD128} --layers 1 --hidden 512 --ffn 512
+            --heads 4 --kv-heads 1 --head-dim 128 --vocab 16
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/make_tiny_gguf.py
+            --out ${GGUF_LOAD_HD64} --layers 1 --hidden 256 --ffn 512
+            --heads 4 --kv-heads 2 --head-dim 64 --vocab 16
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/make_tiny_gguf.py
+    COMMENT "Generating GGUF load-dispatch fixtures"
+    VERBATIM
+  )
+
+  add_custom_target(gguf_load_fixture ALL DEPENDS ${GGUF_LOAD_HD128} ${GGUF_LOAD_HD64})
+  add_dependencies(gguf_load_test gguf_load_fixture)
+  add_dependencies(gguf_load_test gguf_container_fixture)
+
+  add_test(NAME gguf_load_dispatch
+    COMMAND gguf_load_test
+            --gguf ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny.gguf
+            --gguf-sidecar ${CMAKE_CURRENT_BINARY_DIR}/fixture/tiny.gguf.json
+            --hd128 ${GGUF_LOAD_HD128}
+            --hd128-sidecar ${GGUF_LOAD_HD128}.json
+            --hd64 ${GGUF_LOAD_HD64}
+            --hd64-sidecar ${GGUF_LOAD_HD64}.json
+            --out-dir ${CMAKE_CURRENT_BINARY_DIR}
+  )
+endif()

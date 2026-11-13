@@ -47,6 +47,8 @@ add_library(yskn SHARED
   src/gguf/gguf.cpp
   src/gguf/gguf_map.cpp
   src/gguf/gguf_model.cpp
+  src/gguf/gguf_quant.cpp
+  src/gguf/gguf_container.cpp
   src/gguf/gguf_engine.cpp
   src/kvx_probe.cu
   src/lnord.cu
