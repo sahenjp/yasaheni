@@ -61,13 +61,41 @@ More training data narrows the gap because a generalising codebook is already cl
 
 A third: `rotate_matrix` is **not** an involution. `A = S_out · Hn · W · Hn · S_in`, and `S` does not commute with `Hn`, so applying it twice does not return `W`. The inverse mirrors the order: `W = S_in · Hn · A · Hn · S_out`.
 
-## What still blocks running a GGUF model end to end
+## It runs
 
-`yskn_gguf_probe` reports `supported: false` with a specific reason for anything that is not the 27B shape, because `Engine35` hard-codes `hidden 5120 / 24 heads / 4 kv heads / 256 head_dim` and rejects everything else at construction. The GGUF reader, the adapter and the quantizer are all shape-agnostic; the kernels are not.
+A stock GGUF file loads into the engine and produces tokens. Verified on the RTX 3070 with a 28-head, head_dim-128, hidden-3584, ffn-512, 1-layer synthetic model:
 
-To finish the job the engine needs either:
+```
+open: True
+prefill rc: 0  tok: 11
+logits rc: 0  finite: True  nonzero: True
+decode rc: 0  toks: [8, 0, 2, 14]
+```
 
-1. **Shape templating.** Instantiate the Qwen3.5 kernels over `(hidden, heads, kv_heads, head_dim)` for the sizes that matter, or
-2. **A GGUF-backed `Model` for the legacy `Engine` path**, which is already shape-parametric (`Model::load` reads every dimension from `ModelDesc`), and accept that it is slower than the specialised 27B path.
+No YSKN container is involved: GgufContainer dequantizes the BF16 weights, runs the quantization bridge, materializes the image, and Model::load uploads it through the legacy Engine.
 
-Option 2 is the shorter road to a working end-to-end run and is what the next slice should do.
+### The gate is narrower than "the kernels are templated"
+
+The default attention path is not templated. src/post_kernels.cu:47 writes q16 with a literal stride of 28 heads x 128 slots and src/attention_kv4q.cu:81 reads it back the same way. So the gate requires head_dim == 128 and heads == 28.
+
+A head_dim 256 model was measured doing this:
+
+```
+hd256 open: True
+prefill rc: 0  tok: 2147483647
+logits rc: 0  finite: False  nonzero: True
+vals: [nan, nan, nan, nan, nan, nan]
+```
+
+It loads, reports success, and returns NaN. That is why the gate refuses it rather than admitting it on the strength of the generic path, which is off by default.
+
+## What still blocks the 27B model
+
+The GGUF path runs through the legacy Engine, which is shape-parametric for `hidden`, `ffn`, `kv_heads` and `vocab`. It is not parametric for the attention shape: `heads` must be 28 and `head_dim` 128. So a 27B Qwen3 GGUF (24 heads, head_dim 256) is refused.
+
+To run the 27B model from GGUF the engine needs one of:
+
+1. **Template the legacy attention path** over `(heads, head_dim)`. The generic path already exists (`YSKN_ATTN_GENERIC=1`, `src/attention_gqa.cu:171-172`) and is instantiated for `(7,128,128)` and `(6,256,64)`; what is missing is making `qkv_post` and the decode attention honour the config instead of the literal 28 x 128 in `src/post_kernels.cu:47` and `src/attention_kv4q.cu:81`, then gating on the generic path being available.
+2. **Teach `Engine35` to read GGUF.** It is the fast path and already handles 24 heads x 256, but it speaks a different tensor vocabulary (`layers.N.self_attn.q_proj`), needs `layer_types`, and hard-gates on the 27B shape at construction.
+
+Option 1 is the shorter road and is what the next slice should do: it is one kernel generalisation, not a second engine.
