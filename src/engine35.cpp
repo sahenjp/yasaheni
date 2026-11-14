@@ -365,6 +365,19 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   apply_kz();
   { const char* f = std::getenv("YSKN_Q35_FA"); if (f && f[0]) fa_ = std::atoi(f); const char* s = std::getenv("YSKN_Q35_FA_SPLITS"); if (s && std::atoi(s) > 0) fa_splits_ = std::min(32, std::atoi(s)); }
   if (xsm_) { us_ = dz35<float>((size_t)M * 4); S_ = dz35<float>((size_t)M * Q35_SST * 4); ybuf_ = dz35<float>(part_floats_ * 4); }
+  { // Park fingerprint: a handle is only valid for the same file and layout.
+    // The drafter bits are mixed in at call time, so loading one later separates it.
+    std::string np; try { np = std::filesystem::weakly_canonical(path).string(); } catch (...) { np = path; }
+    uint64_t h = 0xcbf29ce484222325ull;
+    auto mix = [&](const void* p, size_t n) { const unsigned char* b = static_cast<const unsigned char*>(p);
+      for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 0x100000001b3ull; } };
+    auto mixu = [&](uint64_t v) { mix(&v, sizeof v); };
+    mix(np.data(), np.size()); mixu(0xffu);
+    mixu((uint64_t)V_); mixu((uint64_t)H_); mixu((uint64_t)F_); mixu((uint64_t)nlayers_);
+    for (const Q35Layer& Y : L_) mixu(Y.full ? 1u : 0u);
+    mixu((uint64_t)max_ctx_); mixu((uint64_t)kv8_); mixu((uint64_t)kv_fp16_);
+    mixu((uint64_t)tbcap_); mixu((uint64_t)tbcap_kb_);
+    park_fp_ = h; }
   cudaMallocHost(&h_pin_, (size_t)PIN_N * 4); cudaMallocHost(&h_pinf_, (size_t)PINF_N * 4); cudaMallocHost(&h_dec_, (size_t)max_ctx_ * 4);
   d_wk_ = dz35<uint8_t>(64); cudaMallocHost(&h_wk_, 4 * 64);           
   cudaStreamSynchronize(st_);
@@ -1607,6 +1620,54 @@ int Engine35::state_hash(uint64_t* out, int max_out) {
   const cudaError_t e = cudaGetLastError();
   if (e != cudaSuccess) throw std::runtime_error(std::string("state_hash: ") + cudaGetErrorString(e));
   return n;
+}
+void Engine35::park_layout(int pos, ParkState& h) const {
+  if (pos < 0 || pos > max_ctx_) throw std::runtime_error("park: position out of range");
+  const size_t SB = (size_t)Q35_GV * Q35_GD * Q35_GD, HB = (size_t)3 * Q35_CONV;
+  h.segs.clear(); h.pos = pos; h.tok = 0; h.ids = nullptr;
+  size_t off = 0;
+  auto add = [&](int l, int kind, size_t bytes) { h.segs.push_back(ParkSeg{l, kind, off, bytes}); off += bytes; };
+  for (int l = 0; l < nlayers_; ++l) {
+    const Q35Layer& Y = L_[l];
+    if (!Y.full) { add(l, PARK_LIN_S, SB * 4); add(l, PARK_LIN_HIST, HB * 2); continue; }
+    if (kv8_) {
+      // Per head the rows are max_ctx_ apart; the handle packs them head by head.
+      add(l, PARK_KV_K, (size_t)pos * Q35_KVH * (Y.kp ? (size_t)32 * tbcap_kb_ : (size_t)Q35_HD));
+      add(l, PARK_KV_V, (size_t)pos * Q35_KVH * (Y.vp ? (size_t)32 * tbcap_kb_ : (size_t)Q35_HD));
+      add(l, PARK_KV_KS, (size_t)pos * Q35_KVH * 4);
+      add(l, PARK_KV_VS, (size_t)pos * Q35_KVH * 4);
+    } else {
+      add(l, PARK_KV_K, (size_t)pos * Q35_KVH * Q35_HD * 2);
+      add(l, PARK_KV_V, (size_t)pos * Q35_KVH * Q35_HD * 2);
+    }
+  }
+  add(-1, PARK_TOK, 4);
+  add(-1, PARK_IDS, (size_t)pos * 4);
+  h.bytes = off;
+}
+size_t Engine35::park_bytes(int pos) const { ParkState h; park_layout(pos, h); return h.bytes; }
+uint64_t Engine35::park_fingerprint() const {
+  uint64_t h = park_fp_;
+  auto mix = [&](uint64_t v) { h ^= v; h *= 0x100000001b3ull; };
+  mix(bdr_.on ? 1u : 0u); mix(mtp_.on ? 2u : 0u);
+  return h;
+}
+ParkState* Engine35::park_alloc(int pos) const {
+  ParkState* h = new ParkState();
+  try {
+    park_layout(pos, *h);
+    if (cudaMallocHost((void**)&h->block, h->bytes) != cudaSuccess) { h->block = nullptr; throw std::runtime_error("park: out of pinned host memory"); }
+    for (const ParkSeg& s : h->segs) if (s.kind == PARK_IDS) h->ids = reinterpret_cast<int32_t*>(h->block + s.off);
+    h->fingerprint = park_fingerprint();
+    h->magic = kParkMagic;
+  } catch (...) { park_release(h); throw; }
+  return h;
+}
+void Engine35::park_release(ParkState* h) {
+  if (!h) return;
+  h->magic = 0;
+  if (h->block) { cudaFreeHost(h->block); h->block = nullptr; }
+  delete h;
 }
 
 void Engine35::load_bdraft(const std::string& path) {

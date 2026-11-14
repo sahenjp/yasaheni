@@ -36,6 +36,22 @@ struct Q35Layer {
 
 
 
+// One segment of a parked handle. layer is an ordinal into L_ (-1 for the
+// scalar entries); kind selects the source buffer.
+enum ParkKind { PARK_KV_K = 0, PARK_KV_V, PARK_KV_KS, PARK_KV_VS, PARK_LIN_S, PARK_LIN_HIST, PARK_TOK, PARK_IDS };
+struct ParkSeg { int layer; int kind; size_t off; size_t bytes; };
+constexpr uint64_t kParkMagic = 0x59534b4e5041524bull;   // "YSKNPARK"
+struct ParkState {
+  unsigned char* block = nullptr;      // one cudaMallocHost allocation, h.bytes long
+  std::vector<ParkSeg> segs;
+  int32_t* ids = nullptr;              // inside block, pos entries
+  int pos = 0;
+  int32_t tok = 0;                     // d_toks_[0] at park time
+  size_t bytes = 0;
+  uint64_t fingerprint = 0;
+  uint64_t magic = 0;
+  int flags = 0;
+};
 struct Q35Mtp {
   bool on = false; Container c; DevTensor fc, head; Q35Layer L; int nsub = 0;
   uint16_t *en = nullptr, *hn = nullptr, *norm = nullptr; int* ids = nullptr;   
@@ -116,6 +132,11 @@ public:
   
   
   int state_hash(uint64_t* out, int max_out);
+  size_t park_bytes(int pos) const;                   
+  uint64_t park_fingerprint() const;                  
+  void park_layout(int pos, ParkState& h) const;      
+  ParkState* park_alloc(int pos) const;               
+  static void park_release(ParkState* h);             
   
   
   
@@ -369,6 +390,7 @@ private:
   
   float* sh_S_ = nullptr; uint16_t* sh_hist_ = nullptr; uint16_t* sh_ring_ = nullptr; uint16_t* sh_pend_ = nullptr;
   int sh_pos_ = -1; std::vector<int32_t> sh_ids_, sh_cur_; unsigned long long sh_epoch_ = 1, sh_note_ = 0;
+  uint64_t park_fp_ = 0;               // model path and layout, fixed at open
   
   
   
