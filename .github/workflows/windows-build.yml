@@ -24,13 +24,16 @@ jobs:
         run: choco install ninja -y --no-progress
 
       # Same CUDA as the Linux build: 12.8 is the first release that can emit
-      # sm_120 (RTX 5090), which the engine needs.
+      # sm_120 (RTX 5090), which the engine needs. No "crt" sub-package here:
+      # that component name only exists in the Linux packages, and asking the
+      # Windows network installer for it makes it exit with an error before
+      # installing anything. On Windows the CRT headers ship inside nvcc.
       - name: Install the CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda: "12.8.0"
           method: network
-          sub-packages: '["nvcc", "cudart", "crt"]'
+          sub-packages: '["nvcc", "cudart"]'
 
       - name: Show the toolchain
         run: |
