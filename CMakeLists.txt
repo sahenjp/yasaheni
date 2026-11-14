@@ -14,13 +14,13 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # caller widen it, and we drop architectures the installed toolkit cannot emit.
 #   -DCMAKE_CUDA_ARCHITECTURES="120;86;80"     explicit list
 #   -DYSKN_CUDA_ARCH=native                    ask the driver for this machine's GPU
-#   -DYSKN_CUDA_ARCH=portable                  "120;86;80;75"
+#   -DYSKN_CUDA_ARCH=portable                  "120;90;86;80"
 set(YSKN_CUDA_ARCH "" CACHE STRING "Comma/semicolon separated SM list, 'native' or 'portable'")
 if(YSKN_CUDA_ARCH)
   if(YSKN_CUDA_ARCH STREQUAL "native")
     set(CMAKE_CUDA_ARCHITECTURES native)
   elseif(YSKN_CUDA_ARCH STREQUAL "portable")
-    set(CMAKE_CUDA_ARCHITECTURES "120;90;86;80;75")
+    set(CMAKE_CUDA_ARCHITECTURES "120;90;86;80")
   else()
     string(REPLACE "," ";" _yskn_arch_list "${YSKN_CUDA_ARCH}")
     set(CMAKE_CUDA_ARCHITECTURES "${_yskn_arch_list}")
@@ -28,6 +28,20 @@ if(YSKN_CUDA_ARCH)
 elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 120)
 endif()
+
+# cp.async and int8/bf16 mma.sync need sm_80; stop here instead of in ptxas.
+foreach(_yskn_arch IN LISTS CMAKE_CUDA_ARCHITECTURES)
+  if(_yskn_arch STREQUAL "native")
+    continue()
+  endif()
+  if(_yskn_arch STREQUAL "all" OR _yskn_arch STREQUAL "all-major")
+    message(FATAL_ERROR "yskn: ${_yskn_arch} expands to architectures below sm_80; give an explicit list of sm_80 or newer architectures, for example -DCMAKE_CUDA_ARCHITECTURES=\"120;90;86;80\".")
+  endif()
+  string(REGEX REPLACE "(-real|-virtual|[af])$" "" _yskn_arch_num "${_yskn_arch}")
+  if(_yskn_arch_num MATCHES "^[0-9]+$" AND _yskn_arch_num LESS 80)
+    message(FATAL_ERROR "yskn: ${_yskn_arch} is below sm_80; the kernels need sm_80 or newer (cp.async, int8/bf16 mma.sync).")
+  endif()
+endforeach()
 
 find_package(CUDAToolkit REQUIRED)
 message(STATUS "yskn: CUDA ${CUDAToolkit_VERSION}, architectures ${CMAKE_CUDA_ARCHITECTURES}")
