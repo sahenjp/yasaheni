@@ -146,6 +146,7 @@ public:
   
   void snap_save(const int32_t* ids, int n);        
   void snap_load();                                  
+  ParkState* park(const int32_t* ids, int n);        
   int  snap_pos() const { return sh_pos_; }
   const std::vector<int32_t>& snap_ids() const { return sh_ids_; }
   void snap_note(const int32_t* ids, int n) { sh_cur_.assign(ids, ids + n); sh_note_ = sh_epoch_; }   
@@ -388,12 +389,18 @@ private:
   bool specx_scope_ = false;  
   bool pre_committed_ = false;   
   
+  void linear_out(float* dst_S, uint16_t* dst_hist);            
+  void linear_in(const float* src_S, const uint16_t* src_hist); 
   float* sh_S_ = nullptr; uint16_t* sh_hist_ = nullptr; uint16_t* sh_ring_ = nullptr; uint16_t* sh_pend_ = nullptr;
   int sh_pos_ = -1; std::vector<int32_t> sh_ids_, sh_cur_; unsigned long long sh_epoch_ = 1, sh_note_ = 0;
   uint64_t park_fp_ = 0;               // model path and layout, fixed at open
-  
-  
-  
+  int park_stage_mb_ = 64;             // device staging reserved for park, split into two halves
+  unsigned char* park_stg_ = nullptr;  // allocated on the first park; null means use the old 3D copies
+  size_t park_stg_half_ = 0;
+  bool park_stg_tried_ = false;
+  cudaStream_t park_gs_ = nullptr;     // gather stream, so the next chunk overlaps the previous DtoH
+  cudaEvent_t park_ev_[2] = {};
+
   int vis_n_ = 0, vis_delta_ = 0; std::vector<int32_t> vis_pos_; std::vector<int> vis_map_; std::vector<unsigned long long> vis_hash_;
   bool visual_prefix_agrees(const std::vector<int>& map, const int32_t* positions, int n_prompt, int delta,
                             const std::vector<unsigned long long>& hash) const;
