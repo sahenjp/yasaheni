@@ -19,6 +19,7 @@ extern "C" {
 YSKNCUDA_API int yskn_repack_warp_to_frag(const uint32_t* d_words, uint32_t* d_frag, int rows, int seqs, int wps, void* cuda_stream);
 YSKNCUDA_API int yskn_repack_warp_to_frag_host(const uint32_t* h_words, uint32_t* h_frag, int rows, int seqs, int wps);
 typedef struct yskn_engine yskn_engine;
+struct yskn_park;
  
 YSKN_API yskn_engine* yskn_open(const char* yskn_path, int max_ctx, int device, int flags);
 YSKN_API void          yskn_close(yskn_engine* e);
@@ -73,6 +74,27 @@ YSKN_API int           yskn_set_opt(yskn_engine* e, int key, int value);
 
 YSKN_API int           yskn_lfrow_table(yskn_engine* e, const uint8_t* tab48);
 YSKN_API int           yskn_lfrow_promote(yskn_engine* e, int src, int dst);
+
+YSKN_API int           yskn_cancel(yskn_engine* e);
+YSKN_API int           yskn_snap_info(yskn_engine* e, int32_t* out4, int32_t* ids, int max_ids);
+YSKN_API int           yskn_state_hash(yskn_engine* e, uint64_t* out, int max_out, int* n_out);
+
+// Parked context handles. A handle keeps the committed durable qwen3_5 state in pinned host memory: KV rows [0,pos), the
+// linear S and hist arrays, d_toks_[0] and the token ids. The bdraft KV rings and the HCAP capture buffer are not part of the
+// handle: resume clears them, so target tokens are still verified but the draft path starts from an empty ring. park refuses
+// MTP drafter state ("park: MTP drafter state is not parkable yet"), visual state ("park: visual state is not parkable") and
+// a state that is mid-verify or pre-committed ("park: state is not committed").
+// Handles are reusable and resume does not consume them. yskn_park_info writes out4 =
+// {position, token_id_count, reserved (0), last_token}; bytes receives the pinned byte count of the handle (the same value
+// yskn_park_size reports for that position).
+// yskn_park_free releases the handle: call it exactly once per handle, never use the pointer afterwards. The engine keeps at
+// most one released block (the largest seen) so the next park does not pay cudaMallocHost again; YSKN_PARK_REUSE=0 frees every
+// released block instead.
+YSKN_API int           yskn_park(yskn_engine* e, const int32_t* ids, int n, struct yskn_park** out);
+YSKN_API int           yskn_park_size(yskn_engine* e, int pos, size_t* bytes);
+YSKN_API int           yskn_resume(yskn_engine* e, const struct yskn_park* h);
+YSKN_API int           yskn_park_info(const struct yskn_park* h, int32_t* out4, size_t* bytes);
+YSKN_API void          yskn_park_free(struct yskn_park* h);
 
 
 

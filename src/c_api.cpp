@@ -181,3 +181,29 @@ extern "C"  int yskn_nll_layer(yskn_engine* e,const int32_t* ids,int n,float* ou
 extern "C"  int yskn_layer_info(yskn_engine* e,uint64_t* out) {
   YSKN_TRY(if(!e->q)throw std::runtime_error("layer_info needs 27B");e->q->layer_info(out))
 }
+extern "C" YSKN_API int yskn_park(yskn_engine* e, const int32_t* ids, int n, struct yskn_park** out) {
+  YSKN_TRY(if (!e->q) throw std::runtime_error("park: qwen3_5 engine only");
+           if (!out) throw std::runtime_error("park: out must not be null");
+           *out = reinterpret_cast<struct yskn_park*>(e->q->park(ids, n)))
+}
+extern "C" YSKN_API int yskn_park_size(yskn_engine* e, int pos, size_t* bytes) {
+  YSKN_TRY(if (!e->q) throw std::runtime_error("park: qwen3_5 engine only");
+           if (!bytes) throw std::runtime_error("park: bytes must not be null");
+           *bytes = e->q->park_bytes(pos))
+}
+extern "C" YSKN_API int yskn_resume(yskn_engine* e, const struct yskn_park* h) {
+  YSKN_TRY(if (!e->q) throw std::runtime_error("resume: qwen3_5 engine only");
+           e->q->resume(reinterpret_cast<const yskn::ParkState*>(h)))
+}
+extern "C" YSKN_API int yskn_park_info(const struct yskn_park* h, int32_t* out4, size_t* bytes) {
+  try {                                   // a getter: keep its catch local instead of going through YSKN_TRY
+    const yskn::ParkState* s = reinterpret_cast<const yskn::ParkState*>(h);
+    if (!s || s->magic != yskn::kParkMagic) throw std::runtime_error("park: handle is not live");
+    if (out4) { out4[0] = s->pos; out4[1] = s->pos; out4[2] = 0; out4[3] = s->tok; }   // out4[2] reserved, always 0
+    if (bytes) *bytes = s->bytes;
+    return 0;
+  } catch (const std::exception& ex) { g_err = ex.what(); return -1; }
+}
+extern "C" YSKN_API void yskn_park_free(struct yskn_park* h) {
+  yskn::Engine35::park_release(reinterpret_cast<yskn::ParkState*>(h));
+}
