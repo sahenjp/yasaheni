@@ -3,8 +3,12 @@
 #include "pdl.cuh"
 #include <stdexcept>
 #include <cstdlib>
+#include <cstdio>
 #include <algorithm>
+#include <map>
+#include <mutex>
 #include "kernels.hpp"
+#include "lnord_tab.h"
 #include <cuda_bf16.h>
 #include "a8_prologue.cuh"
 namespace yskn {
@@ -412,8 +416,90 @@ template <int K, int MT, int UWX = 0, int MBX = 0, bool LO = false> static void 
 
 
 
-static int lno_cfg_env() { static const int v = [] { const char* e = std::getenv("YSKN_LNO_CFG"); return e && e[0] ? std::atoi(e) : -1; }(); return v; }
-static int lno_cfg_of(int M) { static const int tab[9] = {0, 1, 2, 1, 2, 2, 2, 2, 2}; const int f = lno_cfg_env(); return f >= 0 ? f : (M <= 8 ? tab[M] : 0); }
+static int lno_cfg_env() {
+  // Read once per process, like the other YSKN_ settings. A value outside
+  // 0..2 is ignored with one warning and falls back to the per-M table.
+  static const int v = [] {
+    const char* e = std::getenv("YSKN_LNO_CFG");
+    const int c = yskn::lnord_tab::parse_cfg(e);
+    if (c == yskn::lnord_tab::kInvalid)
+      std::fprintf(stderr, "[qwen3_5] YSKN_LNO_CFG=\"%s\": expected an integer 0..2; ignored\n", e);
+    return c == yskn::lnord_tab::kInvalid ? yskn::lnord_tab::kUnset : c;
+  }();
+  return v;
+}
+
+struct LnoCc { int major, minor; };
+static LnoCc lno_query_cc(int dev) {
+  LnoCc r{-1, -1}; int a = 0, b = 0;
+  if (cudaDeviceGetAttribute(&a, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
+      cudaDeviceGetAttribute(&b, cudaDevAttrComputeCapabilityMinor, dev) == cudaSuccess) { r.major = a; r.minor = b; }
+  return r;
+}
+struct LnoTab { int v[9]; };
+struct LnoOverride { int v[9]; int n; };
+
+// Compute capability is cached per device ordinal: an open on one GPU must not
+// decide the table for another one. Only successful queries are cached, and the
+// cache is a map so hosts with more than 16 devices keep the fast path.
+static LnoCc lno_cc_for(int dev) {
+  static std::mutex mu;
+  static std::map<int, LnoCc> cache;
+  { std::lock_guard<std::mutex> lk(mu); auto it = cache.find(dev); if (it != cache.end()) return it->second; }
+  const LnoCc cc = lno_query_cc(dev);
+  if (cc.major >= 0) { std::lock_guard<std::mutex> lk(mu); cache.emplace(dev, cc); }
+  return cc;
+}
+
+// CUDA's current device is per thread, and cudaSetDevice can change it at any
+// time. Read it on every call: the launch targets whatever device is current on
+// the calling thread at that moment, so a cached binding would go stale.
+static int lno_current_dev() {
+  int d = 0; return cudaGetDevice(&d) == cudaSuccess ? d : 0;
+}
+
+static const LnoOverride& lno_tab_env() {
+  // Read once per process. A malformed value is ignored as a whole.
+  static const LnoOverride o = [] {
+    LnoOverride r{{0}, 0};
+    const char* e = std::getenv("YSKN_LNO_CFG_TAB");
+    if (e && e[0]) {
+      const int n = yskn::lnord_tab::parse_tab(e, r.v);
+      if (n > 0) r.n = n;
+      else std::fprintf(stderr, "[qwen3_5] YSKN_LNO_CFG_TAB=\"%s\": expected up to 9 comma-separated integers 0..2; ignored\n", e);
+    }
+    return r;
+  }();
+  return o;
+}
+
+static LnoTab lno_make_tab(const LnoCc& cc) {
+  LnoTab r; yskn::lnord_tab::device_table(cc.major, cc.minor, r.v);
+  const LnoOverride& o = lno_tab_env();
+  for (int i = 0; i < o.n; ++i) r.v[i] = o.v[i];
+  return r;
+}
+static LnoTab lno_tab_for(int dev) {
+  static std::mutex mu;
+  static std::map<int, LnoTab> cache;
+  { std::lock_guard<std::mutex> lk(mu); auto it = cache.find(dev); if (it != cache.end()) return it->second; }
+  const LnoCc cc = lno_cc_for(dev);
+  const LnoTab t = lno_make_tab(cc);
+  // A failed capability query is retried on the next call; do not pin its table.
+  if (cc.major >= 0) { std::lock_guard<std::mutex> lk(mu); cache.emplace(dev, t); }
+  return t;
+}
+static int lno_cfg_of(int M) {
+  const int f = lno_cfg_env(); const LnoTab t = lno_tab_for(lno_current_dev());
+  return yskn::lnord_tab::pick_cfg(M, f, t.v);
+}
+void lnord_cfg_table(int tab[9], int* cc_major, int* cc_minor) {
+  const int dev = lno_current_dev();
+  const LnoCc cc = lno_cc_for(dev); const LnoTab t = lno_tab_for(dev); const int f = lno_cfg_env();
+  for (int i = 0; i < 9; ++i) tab[i] = f >= 0 ? f : t.v[i];
+  if (cc_major) *cc_major = cc.major;
+  if (cc_minor) *cc_minor = cc.minor;
+}
 template <int K> static void launch_lno_m(const GemvLaunch& P, cudaStream_t st) {
   const int cfg = P.lno_cfg >= 0 ? P.lno_cfg : lno_cfg_of(P.M);
   if (P.M <= 8 && P.lo) {                                              

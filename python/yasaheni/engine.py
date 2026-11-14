@@ -95,6 +95,7 @@ class Engine:
         self.profile = profile or RuntimeProfile.default(pack)
         self.utf8_paths = _narrow_paths_as_utf8([pack.weights, pack.draft, pack.draft_head, pack.kv_profile])
         self.removed_env = self.profile.apply()
+        self.kept_env = self.profile.kept_env
         if self.utf8_paths:
             _put_narrow_env_utf8({k: v for k, v in self.profile.env.items() if k in ("YSKN_BDR_SHEAD", "YSKN_TB_PROFILE")})
         self.lib = lib or NativeLib(dll)

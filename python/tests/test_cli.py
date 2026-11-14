@@ -173,7 +173,7 @@ class CliTests(unittest.TestCase):
 
     def test_serve_end_to_end(self):
         port = free_port()
-        env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONUNBUFFERED="1", YSKN_STALE_SETTING="1")
+        env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONUNBUFFERED="1", YSKN_STALE_SETTING="1", YSKN_LNO_CFG="1")
         env.pop("YASAKANI_DLL", None)
         proc = subprocess.Popen([sys.executable, "-m", "yasaheni", "serve", "--model-dir", str(self.folder), "--dll", self.dll, "--port", str(port),
                                  "--max-ctx", "4096", "--api-key", "k3y"], cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -207,6 +207,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, err)
             self.assertIn("stopping", err)
             self.assertIn("ignored 1 YSKN_* setting", err)           # the stale setting from the shell was dropped
+            self.assertIn("kept tuning settings: YSKN_LNO_CFG", err)
             self.assertIn("API key required", err)
         finally:
             if proc.poll() is None:

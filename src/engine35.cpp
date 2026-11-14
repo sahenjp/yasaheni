@@ -13,6 +13,7 @@
 #include "signs.hpp"
 #include "devmem.hpp"
 #include "portability.hpp"
+#include "lnord_tab.h"
 
 #if YSKN_KVX_MODE == 3
 #include <vector>
@@ -370,6 +371,9 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   cudaStreamSynchronize(st_);
   const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("Engine35 load: ") + cudaGetErrorString(e));
   size_t fr = 0, tot = 0; cudaMemGetInfo(&fr, &tot);
+  { int tab[9] = {0}, cc_major = -1, cc_minor = -1; lnord_cfg_table(tab, &cc_major, &cc_minor);
+    std::fprintf(stderr, "[qwen3_5] LNORD cfg M=0..8: %d %d %d %d %d %d %d %d %d (compute capability %d.%d)\n",
+                 tab[0], tab[1], tab[2], tab[3], tab[4], tab[5], tab[6], tab[7], tab[8], cc_major, cc_minor); }
   std::fprintf(stderr, "[qwen3_5] %d layers loaded, LNORD codes %.2f GB, free %.1f / %.1f GB\n", nlayers_, lno_bytes_ / 1e9, fr / 1e9, tot / 1e9);
 }
 Engine35::~Engine35() {
@@ -1752,7 +1756,17 @@ void Engine35::free_shead() {
   bdr_.sk_bt = bdr_.sk_as = bdr_.sk_ws = bdr_.sk_q = bdr_.sk_s = bdr_.sk_cv = nullptr; bdr_.sk_a = bdr_.sk_w = nullptr; bdr_.sk_hist = nullptr;
   bdr_.sk_thr = bdr_.sk_ci = nullptr; bdr_.sk_m = 0; bdr_.sk_grid = 0;
 }
-static int bdr_lno_cfg() { static const int v = [] { const char* e = std::getenv("YSKN_BDR_CFG"); return e && e[0] ? std::atoi(e) : -1; }(); return v; }   
+static int bdr_lno_cfg() {
+  // Read once per process; a value outside 0..2 is ignored with one warning.
+  static const int v = [] {
+    const char* e = std::getenv("YSKN_BDR_CFG");
+    const int c = yskn::lnord_tab::parse_cfg(e);
+    if (c == yskn::lnord_tab::kInvalid)
+      std::fprintf(stderr, "[qwen3_5] YSKN_BDR_CFG=\"%s\": expected an integer 0..2; ignored\n", e);
+    return c == yskn::lnord_tab::kInvalid ? yskn::lnord_tab::kUnset : c;
+  }();
+  return v;
+}
 void Engine35::bdr_gemv(std::initializer_list<DevTensor*> ts, int M) {
   GemvLaunch P{}; P.M = M; P.stage_bytes = 0;
   for (DevTensor* t : ts) {

@@ -52,6 +52,7 @@ struct GemmLaunch { TensorDev t; float* part; const int8_t* qx; const float* alp
 size_t gemv_smem_bytes(const GemvLaunch& P);
 bool   lnord_eligible(const GemvLaunch& P);                      
 void   launch_lnord(const GemvLaunch& P, cudaStream_t st);
+void   lnord_cfg_table(int tab[9], int* cc_major, int* cc_minor);
 size_t lnord_bytes(int N, int Kc, int K);
 void   lnord_build(const uint4* frag, int N, int Kc, int K, uint4* out, cudaStream_t st);
 void   launch_gemv(const GemvLaunch& P, cudaStream_t st);
