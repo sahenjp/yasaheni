@@ -60,6 +60,36 @@ class GenResult:
         return len(self.ids)
 
 
+class Parked:
+    """A context kept in pinned host memory.  Reusable: resuming does not consume it, and closing it gives the memory back."""
+
+    def __init__(self, owner: "Engine", handle, position: int, token_ids: Sequence[int], nbytes: int):
+        self._owner: Optional["Engine"] = owner
+        self._h = handle
+        self.position = int(position)
+        self.token_ids = [int(x) for x in token_ids]
+        self.nbytes = int(nbytes)
+        self.closed = False
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        if self._owner is not None:
+            self._owner.park_free(self)
+        else:
+            self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __repr__(self) -> str:
+        return "Parked(position=%d, tokens=%d, bytes=%d%s)" % (
+            self.position, len(self.token_ids), self.nbytes, ", closed" if self.closed else "")
+
+
 def _narrow_paths_as_utf8(paths) -> bool:
     """Windows: the engine library gets file names as UTF-8 bytes, but parts of it read narrow file names in the code page of the C
     runtime's locale (the system code page by default), so a folder name with characters outside ASCII could not be opened.  When a
@@ -102,6 +132,7 @@ class Engine:
         self._lock = threading.RLock()
         self._cancelled = False
         self._busy = False
+        self._parked: Dict[int, Parked] = {}
         self._e = self._f["yskn_open"](str(pack.weights).encode("utf-8"), self.max_ctx, int(device), 0)
         if not self._e:
             msg = self.lib.last_error()
@@ -124,6 +155,8 @@ class Engine:
 
     def close(self) -> None:
         with self._lock:
+            for h in list(self._parked.values()):
+                self._release(h)
             if getattr(self, "_e", None):
                 self._f["yskn_close"](self._e)
                 self._e = None
@@ -156,6 +189,86 @@ class Engine:
             n = C.c_int(0)
             self._check(self._f["yskn_state_hash"](self._e, out.ctypes.data, len(out), C.byref(n)))
             return out[:n.value].copy()
+
+    # ---- parked contexts -------------------------------------------------------------------------------------------------------
+    def live_ids(self) -> List[int]:
+        """Ids of the context the engine would continue, or an empty list when there is no live state."""
+        with self._lock:
+            self._need_open()
+            out4 = np.zeros(4, np.int32)
+            self._check(self._f["yskn_snap_info"](self._e, out4.ctypes.data, None, 0))
+            if not out4[2] or int(out4[3]) <= 0:
+                return []
+            ids = np.zeros(int(out4[3]), np.int32)
+            self._check(self._f["yskn_snap_info"](self._e, out4.ctypes.data, ids.ctypes.data, len(ids)))
+            return [int(x) for x in ids]
+
+    def park_size(self, pos: int) -> int:
+        """Bytes of pinned host memory a handle for ``pos`` tokens would need."""
+        with self._lock:
+            self._need_open()
+            n = C.c_size_t(0)
+            self._check(self._f["yskn_park_size"](self._e, int(pos), C.byref(n)))
+            return int(n.value)
+
+    def park(self, ids: Optional[Sequence[int]] = None) -> Parked:
+        """Copy the durable state into pinned host memory.  The engine is not changed.  ``ids`` must name the current position
+        (the live ids are used when it is None)."""
+        if self._busy:
+            raise YasakaniError("the engine is busy")
+        with self._lock:
+            self._need_open()
+            if self._busy:
+                raise YasakaniError("the engine is busy")
+            if ids is None:
+                token_ids = self.live_ids()
+                pass_ids, n = None, 0
+            else:
+                arr = np.ascontiguousarray(np.asarray(ids, dtype=np.int32))
+                token_ids = [int(x) for x in arr]
+                pass_ids, n = arr.ctypes.data, len(arr)
+            out = C.c_void_p(0)
+            self._check(self._f["yskn_park"](self._e, pass_ids, n, C.byref(out)))
+            out4 = np.zeros(4, np.int32)
+            nbytes = C.c_size_t(0)
+            self._check(self._f["yskn_park_info"](out, out4.ctypes.data, C.byref(nbytes)))
+            h = Parked(self, out, int(out4[0]), token_ids[:int(out4[0])], int(nbytes.value))
+            self._parked[id(h)] = h
+            return h
+
+    def resume(self, h: Parked) -> None:
+        """Restore a handle into this engine.  The handle stays valid and can be resumed again."""
+        if self._busy:
+            raise YasakaniError("the engine is busy")
+        with self._lock:
+            self._need_open()
+            if self._busy:
+                raise YasakaniError("the engine is busy")
+            self._check_live_handle(h)
+            self._check(self._f["yskn_resume"](self._e, h._h))
+
+    def park_free(self, h: Parked) -> None:
+        """Release a handle.  Freeing an already closed handle does nothing."""
+        with self._lock:
+            if not isinstance(h, Parked):
+                raise YasakaniError("not a parked handle")
+            if h._owner is not None and h._owner is not self:
+                raise YasakaniError("the parked handle belongs to another engine")
+            self._release(h)
+
+    def _check_live_handle(self, h) -> None:
+        if not isinstance(h, Parked) or h.closed or not h._h:
+            raise YasakaniError("the parked handle is closed")
+
+    def _release(self, h: Parked) -> None:
+        if h.closed:
+            return
+        h.closed = True
+        h._owner = None
+        self._parked.pop(id(h), None)
+        handle, h._h = h._h, None
+        if handle:
+            self._f["yskn_park_free"](handle)
 
     def cancel(self) -> None:
         """Ask a running generation to stop at its next pass boundary (the state stays valid)."""

@@ -37,6 +37,12 @@ SIGNATURES: Dict[str, Tuple[list, object]] = {
     "yskn_load_bdraft": ([P, C.c_char_p], I),
     "yskn_spec_generate": ([P, P, I, I, P, I, P, P, P], I),
     "yskn_state_hash": ([P, P, I, P], I),
+    "yskn_snap_info": ([P, P, P, I], I),
+    "yskn_park": ([P, P, I, P], I),
+    "yskn_park_size": ([P, I, P], I),
+    "yskn_resume": ([P, P], I),
+    "yskn_park_info": ([P, P, P], I),
+    "yskn_park_free": ([P], None),
 }
 
 _LIB_NAME = "yskn.dll" if sys.platform == "win32" else "libyskn.so"
