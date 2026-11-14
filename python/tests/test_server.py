@@ -182,13 +182,54 @@ class ServerTests(unittest.TestCase):
         r.read()
 
 
+    def test_completion_id_is_not_the_conversation_id(self):
+        self.start()
+        self.stub.push(self.ids("OK") + [EOS])
+        status, d = self.chat(messages=[{"role": "user", "content": "hello"}], conversation_id="conv-abc")
+        self.assertEqual(status, 200)
+        self.assertTrue(d["id"].startswith("chatcmpl-"))
+        self.assertNotEqual(d["id"], "conv-abc")
+
+    def test_conversation_id_validation(self):
+        self.start()
+        status, d = self.chat(conversation_id="x" * 201)
+        self.assertEqual(status, 400)
+        self.assertIn("at most 200", d["error"]["message"])
+        status, d = self.chat(conversation_id=123)
+        self.assertEqual(status, 400)
+        self.assertIn("must be a string", d["error"]["message"])
+
+    def test_failed_run_clears_the_live_conversation(self):
+        self.start()
+        ok = self.ids("OK")
+        self.stub.push(ok + [EOS])
+        status, _ = self.chat(messages=[{"role": "user", "content": "one"}], conversation_id="alpha")
+        self.assertEqual(status, 200)
+        orig = self.state.runner.engine.generate
+
+        def failing(*a, **k):
+            from yasaheni._native import YasakaniError
+            raise YasakaniError("CUDA error: something")
+        try:
+            self.state.runner.engine.generate = failing
+            status, d = self.chat(messages=[{"role": "user", "content": "two"}], conversation_id="bravo")
+            self.assertEqual(status, 500)
+            self.assertIsNone(self.state.parking._live_cid)     # the failed run is not remembered under any conversation
+        finally:
+            self.state.runner.engine.generate = orig
+        self.stub.push(ok + [EOS])
+        status, d = self.chat(messages=[{"role": "user", "content": "three"}], conversation_id="charlie")
+        self.assertEqual(status, 200)                            # the next request still runs and parks normally
+
     def test_park_lcp_continuation(self):
         self.start()
+        # Without a thinking block the tokenized generation prompt is a true prefix of the continuation prompt.
+        kw = {"chat_template_kwargs": {"enable_thinking": False}}
         a = [{"role": "system", "content": "rules"}, {"role": "user", "content": "one"}]
         b = [{"role": "system", "content": "rules"}, {"role": "user", "content": "two"}]
         ok, yes = self.ids("OK"), self.ids("Yes")
         self.stub.push(ok + [EOS])
-        status, ra = self.chat(messages=a, max_tokens=20, seed=7)
+        status, ra = self.chat(messages=a, max_tokens=20, seed=7, **kw)
         self.assertEqual(status, 200)
         reply_a = ra["choices"][0]["message"]["content"]
         a2 = a + [{"role": "assistant", "content": reply_a}, {"role": "user", "content": "again"}]
@@ -196,20 +237,20 @@ class ServerTests(unittest.TestCase):
         self.engine.reset()
         self.state.parking.clear()
         self.stub.push(ok + [EOS])
-        status, fresh = self.chat(messages=a2, max_tokens=20, seed=7)
+        status, fresh = self.chat(messages=a2, max_tokens=20, seed=7, **kw)
         self.assertEqual(status, 200)
         self.assertEqual(fresh["usage"]["prompt_tokens_details"]["cached_tokens"], 0)
 
         self.engine.reset()
         self.state.parking.clear()
         self.stub.push(ok + [EOS])
-        self.assertEqual(self.chat(messages=a, max_tokens=20, seed=7)[0], 200)
+        self.assertEqual(self.chat(messages=a, max_tokens=20, seed=7, **kw)[0], 200)
         live_a = self.engine.live_ids()
         self.assertGreater(len(live_a), 1)
         self.stub.push(yes + [EOS])
-        self.assertEqual(self.chat(messages=b, max_tokens=20, seed=7)[0], 200)     # parks A, shares only the template prefix
+        self.assertEqual(self.chat(messages=b, max_tokens=20, seed=7, **kw)[0], 200)     # parks A, shares only the template prefix
         self.stub.push(ok + [EOS])
-        status, d = self.chat(messages=a2, max_tokens=20, seed=7)
+        status, d = self.chat(messages=a2, max_tokens=20, seed=7, **kw)
         self.assertEqual(status, 200)
         self.assertEqual(d["choices"][0]["message"]["content"], fresh["choices"][0]["message"]["content"])
         self.assertEqual(d["usage"]["prompt_tokens_details"]["cached_tokens"], len(live_a))   # A was resumed, not pre-filled again

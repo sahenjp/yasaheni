@@ -63,12 +63,13 @@ class GenResult:
 class Parked:
     """A context kept in pinned host memory.  Reusable: resuming does not consume it, and closing it gives the memory back."""
 
-    def __init__(self, owner: "Engine", handle, position: int, token_ids: Sequence[int], nbytes: int):
+    def __init__(self, owner: "Engine", handle, position: int, token_ids: Sequence[int], nbytes: int, last_token: int = 0):
         self._owner: Optional["Engine"] = owner
         self._h = handle
         self.position = int(position)
         self.token_ids = [int(x) for x in token_ids]
         self.nbytes = int(nbytes)
+        self.last_token = int(last_token)                # d_toks_[0]: emitted, not yet consumed by a pass
         self.closed = False
 
     def close(self) -> None:
@@ -232,7 +233,7 @@ class Engine:
             out4 = np.zeros(4, np.int32)
             nbytes = C.c_size_t(0)
             self._check(self._f["yskn_park_info"](out, out4.ctypes.data, C.byref(nbytes)))
-            h = Parked(self, out, int(out4[0]), token_ids[:int(out4[0])], int(nbytes.value))
+            h = Parked(self, out, int(out4[0]), token_ids[:int(out4[0])], int(nbytes.value), int(out4[3]))
             self._parked[id(h)] = h
             return h
 

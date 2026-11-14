@@ -14,7 +14,7 @@
 
 typedef struct { int32_t *ids; int n; int loop_from; } script_t;
 typedef struct yskn_engine {
-    int max_ctx, pos, draft;
+    int max_ctx, pos, draft, tok;
     atomic_int cancel;
     int32_t *hist; int nhist;
     int32_t *snap; int nsnap;
@@ -55,7 +55,7 @@ EXPORT yskn_engine *yskn_open(const char *path, int max_ctx, int device, int fla
     return e;
 }
 EXPORT void yskn_close(yskn_engine *e) { if (e) { free(e->hist); free(e->snap); free(e); } }
-EXPORT int yskn_reset(yskn_engine *e) { free(e->hist); e->hist = 0; e->nhist = 0; e->pos = 0; return 0; }
+EXPORT int yskn_reset(yskn_engine *e) { free(e->hist); e->hist = 0; e->nhist = 0; e->pos = 0; free(e->snap); e->snap = 0; e->nsnap = 0; return 0; }
 EXPORT int yskn_position(yskn_engine *e) { return e->pos; }
 EXPORT const char *yskn_last_error(void) { return g_err; }
 EXPORT int yskn_cancel(yskn_engine *e) { atomic_store(&e->cancel, 1); return 0; }
@@ -114,7 +114,7 @@ EXPORT int yskn_park(yskn_engine *e, const int32_t *ids, int n, struct yskn_park
     memcpy(h->ids, src, sizeof(int32_t) * cnt);
     memcpy(h->hist, src, sizeof(int32_t) * cnt);
     h->pos = cnt; h->nids = cnt; h->nhist = cnt;
-    h->tok = cnt > 0 ? src[cnt - 1] : 0;
+    h->tok = e->tok;
     h->bytes = sizeof(struct yskn_park) + (size_t)cnt * 8 + 4;
     h->fp = (uint64_t)(uint32_t)e->max_ctx;
     h->magic = PARK_MAGIC;
@@ -130,7 +130,7 @@ EXPORT int yskn_resume(yskn_engine *e, const struct yskn_park *h) {
     free(e->hist);
     e->hist = malloc(sizeof(int32_t) * (h->nhist > 0 ? h->nhist : 1));
     memcpy(e->hist, h->hist, sizeof(int32_t) * h->nhist);
-    e->nhist = h->nhist; e->pos = h->pos;
+    e->nhist = h->nhist; e->pos = h->pos; e->tok = h->tok;
     return 0;
 }
 EXPORT int yskn_park_info(const struct yskn_park *h, int32_t *out4, size_t *bytes) {
@@ -201,7 +201,7 @@ EXPORT int yskn_spec_generate(yskn_engine *e, const int32_t *prompt, int n_promp
     int nh = n_prompt + idx - 1;
     int32_t *h = malloc(sizeof(int32_t) * (nh > 0 ? nh : 1));
     memcpy(h, prompt, sizeof(int32_t) * n_prompt); memcpy(h + n_prompt, out, sizeof(int32_t) * (idx - 1));
-    free(e->hist); e->hist = h; e->nhist = nh; e->pos = nh;
+    free(e->hist); e->hist = h; e->nhist = nh; e->pos = nh; e->tok = idx > 0 ? out[idx - 1] : 0;
     if (snap_on && snap_tok >= 0) {                       /* snapshot right after the last chat-start marker of the prompt */
         int last = -1; for (int i = 0; i < n_prompt; i++) if (prompt[i] == snap_tok) last = i;
         if (last >= 0) { free(e->snap); e->nsnap = last + 1; e->snap = malloc(sizeof(int32_t) * e->nsnap); memcpy(e->snap, prompt, sizeof(int32_t) * e->nsnap); }

@@ -45,6 +45,7 @@ class ParkStubTests(unittest.TestCase):
         self.assertEqual(h.position, pos)
         self.assertEqual(h.token_ids, live)
         self.assertEqual(h.token_ids, [5, 6, 7, 11, 12, 13])
+        self.assertEqual(h.last_token, EOS)                     # emitted, not yet consumed
         np.testing.assert_array_equal(self.e.state_hash(), h0)      # parked without changing the engine
 
         self.e.reset()
@@ -86,6 +87,35 @@ class ParkStubTests(unittest.TestCase):
         finally:
             th.join()
         self.assertEqual(box["r"].finish, "length")
+
+    def test_park_resume_busy(self):
+        self._generate([5, 6, 7], [11, 12, 13, EOS])
+        h = self.e.park()
+        started = threading.Event()
+
+        def on_tokens(ids):
+            started.set()
+        self.stub.push([100, 101, 102, 103], loop_from=0)
+        self.stub.delay_us(5000)
+        box = {}
+
+        def run():
+            box["r"] = self.e.generate([5, 6], 1000, on_tokens=on_tokens)
+
+        th = threading.Thread(target=run)
+        th.start()
+        try:
+            self.assertTrue(started.wait(5))
+            with self.assertRaisesRegex(YasakaniError, "busy"):
+                self.e.resume(h)
+        finally:
+            th.join()
+            h.close()
+        self.assertEqual(box["r"].finish, "length")
+
+    def test_park_size_negative(self):
+        with self.assertRaisesRegex(YasakaniError, "out of range"):
+            self.e.park_size(-1)
 
     def test_park_wrong_engine(self):
         self._generate([5, 6, 7], [11, 12, 13, EOS])
@@ -223,6 +253,16 @@ class ParkStoreTests(unittest.TestCase):
         self.assertEqual(len(self.store), 0)
         self.assertEqual(self.store.used, 0)
         self.assertEqual(self.e.position(), 4)                  # the engine was not touched
+
+
+class ParkBudgetTests(unittest.TestCase):
+    def test_park_budget_parsing(self):
+        from yasaheni.parking import DEFAULT_PARK_MB, park_budget_bytes
+        mib = 1024 * 1024
+        cases = [("3", 3 * mib), ("0", 0), ("-5", 0), ("not a number", DEFAULT_PARK_MB * mib), ("", DEFAULT_PARK_MB * mib)]
+        for value, want in cases:
+            with self.subTest(value=value), mock.patch.dict("os.environ", {"YSKN_PARK_MB": value}):
+                self.assertEqual(park_budget_bytes(), want)
 
 
 if __name__ == "__main__":
