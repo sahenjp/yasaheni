@@ -1,102 +1,91 @@
 # Colab A100 comparison: upstream YASAKANI vs yasaheni
 
-Run on a Colab A100-SXM4-40GB (compute capability 8.0, `sm_80`), CUDA 13.0.88, 12 vCPU.
-Both repositories cloned at the same time and built on the same VM.
+A100-SXM4-40GB (compute capability 8.0, `sm_80`), CUDA 13.0.88, 12 vCPU.
+Model: `yasakani-dev/Qwen3.8-27B-YASAKANI-speed` (10.31 GB `YSKN`).
 
-## Summary
+## Getting upstream to run at all
 
-| | upstream `yasakani-dev/yasakani` | `sahenjp/yasaheni` |
-|---|---|---|
-| Builds as shipped | **no** | **yes** |
-| Builds after patching | yes, with 2 edits | n/a (not needed) |
-| Binary architecture | `sm_120` only | `sm_80` (matches the GPU) |
-| Opens a GGUF file | no (`not a YSKN container`) | **yes** |
-| `yskn_gguf_probe` export | absent | present |
-| GGUF inference on A100 | n/a | **works** |
-| Test suite on this machine | none shipped for the engine | 6 suites, 1317 checks, all pass |
+Upstream does not build on this machine. Four changes were needed, and they are
+exactly the portability work yasaheni already contains:
 
-## 1. Upstream does not build on an A100
+| Change | Why |
+|---|---|
+| `_ftelli64`/`_fseeki64` -> `ftello`/`fseeko` | MSVC-only CRT calls |
+| `set(CMAKE_CUDA_ARCHITECTURES 120)` -> `80` | the hard-set line overrides `-DCMAKE_CUDA_ARCHITECTURES` |
+| `griddepcontrol` behind `__CUDA_ARCH__ >= 900` | PDL does not exist below sm_90 |
+| `cp.async.bulk.prefetch` behind the same guard | same |
 
-```
-/tmp/up/src/engine35.cpp:1724:25: error: '_ftelli64' was not declared in this scope
-/tmp/up/src/engine35.cpp:1726:9: error: '_fseeki64' was not declared in this scope
-```
+With those four, upstream builds in 176 s and runs the model. yasaheni needs
+none of them and builds in 173 s.
 
-Two MSVC-only CRT calls. This is a Linux portability failure independent of the GPU.
+## Speed
 
-## 2. The architecture flag is ignored
+Decode, 128 tokens, 24 runs each, interleaved A/B/A/B so drift hits both equally.
+Same model, same environment, same GPU.
 
-Upstream's `CMakeLists.txt:10` contains a hard `set(CMAKE_CUDA_ARCHITECTURES 120)`, which overrides
-whatever you pass on the command line. Passing `-DCMAKE_CUDA_ARCHITECTURES=80` changes nothing:
+| Engine | mean tok/s | median | max |
+|---|---|---|---|
+| upstream (as patched) | 54.52 | 54.52 | 54.64 |
+| **yasaheni** | **58.27** | **58.26** | **58.38** |
 
-```
-CMakeLists.txt: 10:set(CMAKE_CUDA_ARCHITECTURES 120)
-actual nvcc arch flags: arch=compute_120
-```
+**+6.9%**, with no overlap between the two distributions.
 
-The resulting `.so` contains `sm_120` cubins only, which an A100 cannot execute. Even a fully
-patched upstream build is unusable on this hardware.
+Prefill is unchanged (1808 vs 1804 tok/s at 512 tokens), so the difference is
+entirely in the decode path.
 
-## 3. With a 2-line patch, upstream builds but cannot read GGUF
+## Where the 6.9% comes from
 
-Patching only `_ftelli64`/`_fseeki64` to `ftello`/`fseeko` makes it compile (201 s). It then
-refuses the same GGUF file that yasaheni accepts:
+It is not the compiler flags. Three things were ruled out by building upstream
+with each one added in isolation:
 
-```
-upstream+patch   open: False | err: not a YSKN container
-yasaheni         open: True  | err:
-```
+| Variant | decode tok/s |
+|---|---|
+| upstream, plain | 54.42 |
+| upstream + `--fmad=false` | 54.53 |
+| upstream + `--allow-expensive-optimizations` | 54.46 |
+| upstream, SASS only (no PTX) | 54.49 |
+| **upstream + `YSKN_NO_PDL=1`** | **58.25** |
+| yasaheni | 58.22 |
 
-Upstream has no GGUF reader and no `yskn_gguf_probe` export. The `YSKN` converter that would
-produce a file it *can* read is not published, so there is no path to running a model on this
-machine with upstream.
+The cause is Programmatic Dependent Launch. On `sm_90` and later, PDL lets a
+kernel start before its predecessor finishes. On `sm_80` the hardware does not
+have it, but `cudaLaunchKernelEx` with the PDL attribute is still accepted and
+the driver still pays for the launch metadata on every kernel launch. Upstream
+requests it unconditionally, so it pays that cost on an A100.
 
-## 4. yasaheni builds and runs
+yasaheni's `pdl_enabled()` asks the device for its compute capability first:
 
-```
-configure  rc=0    3.2 s   (-DYSKN_CUDA_ARCH=native)
-build      rc=0  172.8 s
-arch       sm_80
-exports    38
-```
-
-GGUF end-to-end on the A100, with a 28-head / head_dim-128 / hidden-3584 fixture:
-
-```
-open: True
-prefill rc=0 tok=8
-logits rc=0 finite=True nonzero=True
-decode rc=0 toks=[56, 31, 8, 56, 31, 4, 31, 4]
-closed
+```cpp
+static const bool arch_ok = [] {
+  int dev = 0, major = 0;
+  if (cudaGetDevice(&dev) != cudaSuccess) return false;
+  if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) return false;
+  return major >= 9;
+}();
+return on && arch_ok && g_pdl_rows <= max_m;
 ```
 
-Its own test suite, run on the same VM:
+So on an A100 it takes the plain launch path and gets the 6.9% back. On a
+5090 it still uses PDL, which is what upstream tuned for.
+
+## Correctness
+
+Both engines produce the same tokens for the same prompt:
 
 ```
-100% tests passed, 0 tests failed out of 6
-Total Test time (real) = 34.79 sec
+upstream  toks=[9, 10, 4838, 1665, 25, 33898, 2110, 30, 31, 1249, 61, 14717, 91, 92, 93, 1]
+yasaheni  toks=[9, 10, 4838, 1665, 25, 33898, 2110, 30, 31, 1249, 61, 14717, 91, 92, 93, 1]
 ```
 
-## What this does and does not show
+Model load time is also the same (3.56 s vs 3.53 s).
 
-It shows that yasaheni is the only one of the two that can build and run on an A100, and that the
-GGUF path works on hardware other than the RTX 3070 it was developed on.
+## Test suite
 
-It does **not** compare speed. Upstream cannot run here at all, and yasaheni's GGUF path is
-limited to 28-head / head_dim-128 models, so no 27B Qwen3 model can be loaded by either on this
-GPU. A throughput comparison needs an `sm_120` machine for upstream, which is the hardware
-upstream was built for.
+yasaheni's 6 suites, run on this machine: 1317 checks, all pass.
 
-## Reproducing
+## Caveat
 
-```bash
-git clone --depth 1 https://github.com/yasakani-dev/yasakani.git /tmp/up
-git clone --depth 1 https://github.com/sahenjp/yasaheni.git /tmp/yh
-
-# upstream: fails on _ftelli64, and even patched produces sm_120 only
-cmake -S /tmp/up -B /tmp/up/build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build /tmp/up/build -j
-
-# yasaheni: builds for whatever GPU is present
-cmake -S /tmp/yh -B /tmp/yh/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYSKN_CUDA_ARCH=native
-cmake --build /tmp/yh/build -j
-```
+These numbers are for the `YSKN` path, which is what both engines share. yasaheni's
+GGUF path is not comparable here: it is limited to 28-head / head_dim-128 models,
+so it cannot load a 27B Qwen3 on this GPU. The GGUF path was verified separately
+on the same machine with a small fixture (open, prefill, decode, logits all work).
