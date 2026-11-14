@@ -1,9 +1,14 @@
 # YSKN container format — specification and encoder feasibility
 
-Scope: everything below is derived by reading the reader side of this repository. The
-converter is **not** in the tree (`docs/TECHNOLOGY.md:100`, `docs/TECHNOLOGY.md:310`,
-`README.md:225`), so every statement about *writing* a container is an inference from what the
-reader accepts. Citations are `file:line` against the current checkout.
+Scope: everything below is derived by reading the reader side of this repository, which is
+the upstream v0.1.0 tree this fork started from. In that tree the converter is **not** present
+(`docs/TECHNOLOGY.md:100`, `docs/TECHNOLOGY.md:310`, `README.md:225`), so every statement about
+*writing* a container is an inference from what the reader accepts. Citations are `file:line`
+against that checkout.
+
+> **Superseded in part by upstream v0.1.2.** Upstream published the encoder at
+> `tools/convert/yskn_convert.py` (1241 lines) on 2026-11-14. Where the two disagree, the
+> published encoder is authoritative. See section 7 for what it confirmed and what it corrected.
 
 ---
 
@@ -587,3 +592,71 @@ and compare to the Viterbi output before ever touching a GPU.
 13. **`src/gguf/gguf.hpp` is a reader only.** It parses GGUF v2/v3 and dequantises to f32
     (`src/gguf/gguf.hpp:151-196`); it contains no YSKN writer and no quantiser. It is the
     input half of a converter, not the output half.
+
+---
+
+## 7. What the published encoder corrected
+
+Upstream v0.1.2 shipped `tools/convert/yskn_convert.py`. Reading it against the inferences in
+section 5 gives a clean scoreboard.
+
+### Confirmed
+
+| This document | The encoder |
+|---|---|
+| 2.2 `kSeqCols = 256`, 128 steps | `T, STEPS, STATE_BITS = 256, 128, 12` |
+| 4 Hadamard scaled by `1/sqrt(512)` | `SCALE512 = 0.04419417382415922` |
+| 4.1 signs applied inside the transform | `fwht512_rows(x, s)`: `(x * s)` through the butterflies |
+| 4.4 `rotate` is not an involution; the inverse mirrors the order | `inverse_rotate(q, si, so)` does exactly that |
+| 2.2 the 12-bit window ends at the current step, newest symbol in the high bits | `decode_block` builds `state = (sym << (STATE_BITS - K)) | (prev >> (2K - STATE_BITS))` |
+| 5.4 step 8 `max|q| == 127` keeps `build_lut8_tau` invertible | `row_scale16` feeds the same `lut16`/`scale16` split |
+| 5.2 open question 1: only certain K values are legal | `--bits` accepts only **6** and **8**, not 4 |
+
+### Corrected
+
+**The per-row scale is the RMS, not the max.** Section 5.4 step 4 guessed
+`tau[r] = max_k |A[r][k]| / 127`. The encoder uses the root mean square of the row:
+
+```python
+def row_scale16(W):
+    "The fp16 scale of every row: the root mean square of the row (fp64), converted to fp16."
+    return torch.sqrt((W.double() ** 2).mean(1)).to(torch.float16)
+```
+
+RMS scaling leaves the bulk of the distribution near the codebook centre instead of pinning the
+largest outlier to 127, which is part of why the released models quantise better at the same bit
+count. It stays self-consistent either way because `tau` is stored in the file.
+
+There is a rounding subtlety worth knowing: `row_scale16_direct` exists because PyTorch rounds
+fp64 to fp16 through fp32 while numpy rounds in one step, and the two differ for about one row in
+10,000. The embedding and output matrices of the released files used the one-step form, the body
+the PyTorch form.
+
+**Error feedback is GPTQ/LDLQ, not a plain Viterbi.** Section 5.4 treated the quantiser as
+independent per 256-column block, with the trellis constraint as the only coupling. The encoder
+carries a Hessian and pushes each block's error into the columns that follow:
+
+```python
+def upper_factor_of_inverse(H64, damp):
+    "C upper triangular with (H + damp * mean(diag H) * I)^-1 = C^T C."
+    ...
+def feedback_tables(Cb, taps):
+    "The 2 x 2 feedback matrices of one block of 256 columns, from the factor C of that block."
+```
+
+So the pieces listed as missing in section 5.2 were recoverable after all: the calibration
+statistics are a damped block-diagonal Hessian per 256-column block, factored by Cholesky, applied
+through `taps` steps of feedback. A container built the way section 5.4 describes loads and runs,
+but it leaves this on the table, which is the concrete reason its output is lossier than the
+released files rather than merely different.
+
+### What this means for this fork
+
+`src/gguf/gguf_quant.cpp` implements the section 5.4 pipeline: Hadamard rotation, k-means codebook
+with the `max|q| == 127` invariant, trellis-aware refinement, Viterbi, warp interleave. It produces
+a container the engine loads and runs. It does not implement Hessian feedback, so its output is
+compatible but not bit-identical, and lossier than the reference encoder's, as section 5.4
+predicted for a pipeline without calibration statistics.
+
+Adopting the real encoder would mean porting `yskn_convert.py`'s Hessian path, which is a larger
+job than the GGUF reader and outside what this fork set out to do.

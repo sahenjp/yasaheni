@@ -78,3 +78,22 @@ ctest --test-dir build --output-on-failure
 ## Upstream
 
 The original engine, its published measurements and its model files are at [yasakani-dev/yasakani](https://github.com/yasakani-dev/yasakani). This port does not change what the kernels compute; it changes where they run and what they can read.
+
+### Where this fork stands against upstream v0.1.2
+
+Upstream released v0.1.1 and v0.1.2 on 2026-11-13/14. This fork started from v0.1.0. Checked against v0.1.2:
+
+| | v0.1.2 | This fork |
+|---|---|---|
+| MSVC-only `_ftelli64`/`_fseeki64` | fixed (same `#ifndef _WIN32` macro) | fixed |
+| `--fmad=false` on Linux builds | added | present |
+| `CMAKE_CUDA_ARCHITECTURES` | still hard-set to `120`; `-DCMAKE_CUDA_ARCHITECTURES=80` is ignored | `-DYSKN_CUDA_ARCH=native` / `portable` |
+| `griddepcontrol` below sm_90 | still unguarded, ptxas fails | guarded |
+| `cp.async.bulk.prefetch` below sm_90 | still unguarded, ptxas fails | guarded |
+| PDL on a pre-Hopper device | still requested, measured 6.9% slower on an A100 | disabled by a compute-capability check |
+| GGUF input | not supported | reader, adapter, quantizer, container |
+
+Verified by compiling the same two translation units for `sm_80`: v0.1.2 produces `ptxas ... requires .target sm_90 or higher`, this fork produces zero errors.
+
+Upstream v0.1.2 also published the `YSKN` encoder at `tools/convert/yskn_convert.py`, which [docs/GGUF_DESIGN.md](docs/GGUF_DESIGN.md#7-what-the-published-encoder-corrected) checks this repository's format analysis against.
+
