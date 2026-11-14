@@ -59,8 +59,8 @@ def _candidates(explicit: Optional[str]):
     here = Path(__file__).resolve().parent
     if sys.platform != "win32":
         # Linux: next to the package, then the build folders of a source checkout, then the system location.
-        for d in (here, here.parent, here.parents[1] / "build-linux", here.parents[1] / "build", here.parents[1] / "build" / "bin",
-                  Path("/usr/local/lib")):
+        for d in (here, here.parent, here.parents[1] / "build-linux" / "bin", here.parents[1] / "build-linux",
+                  here.parents[1] / "build" / "bin", here.parents[1] / "build", Path("/usr/local/lib")):
             yield d / _LIB_NAME
         return
     for d in (here / "bin", here.parent / "bin", here.parents[1] / "build" / "bin", here.parents[1] / "build" / "Release",
@@ -70,7 +70,7 @@ def _candidates(explicit: Optional[str]):
 
 def find_library(explicit: Optional[str] = None) -> Path:
     """The engine library: the given path, ``YASAKANI_DLL``, or a ``bin`` / ``build`` folder next to the package (Linux also
-    looks in ``build-linux`` and ``/usr/local/lib``)."""
+    looks in ``build-linux/bin`` and ``/usr/local/lib``)."""
     tried = []
     for p in _candidates(explicit):
         tried.append(str(p))

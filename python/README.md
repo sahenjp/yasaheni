@@ -16,7 +16,7 @@ Status: first public release (`0.1.0`). Text only. One request is generated at a
 | OS | **Linux** or **Windows 11**, 64-bit. On Windows the *Microsoft Visual C++ 2015-2022 x64 runtime* is needed ([download](https://aka.ms/vs/17/release/vc_redist.x64.exe)); on Linux the CUDA runtime is linked statically, so only the driver is needed at run time |
 | Python | 3.10 or newer |
 | Disk | about 15 GB for the quality model folder, about 13 GB for the fastest model folder |
-| Engine library | `yskn.dll` from the release page, or a `libyskn.so` built with `scripts/build-linux.sh` (`build/bin/libyskn.so` is found automatically) |
+| Engine library | `yskn.dll` from the release page, or a `libyskn.so` built with `scripts/build-linux.sh` (`build-linux/bin/libyskn.so` is found automatically) |
 
 You do **not** need the CUDA Toolkit, PyTorch, or a C++ compiler.
 
