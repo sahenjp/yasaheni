@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+import contextlib
+import io
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -128,6 +131,98 @@ class ParkStubTests(unittest.TestCase):
         finally:
             other.close()
         self.assertFalse(h.closed)
+
+
+class ParkStoreTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.stub = support.Stub()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.stub.delay_us(0)
+        self.e = support.open_engine(Path(self.tmp.name), self.stub)
+        from yasaheni.parking import ParkStore
+        self.store = ParkStore(self.e, 1 << 30)
+
+    def tearDown(self):
+        self.store.clear()
+        self.e.close()
+        self.tmp.cleanup()
+
+    def _state(self, prompt, script, conversation_id=None):
+        self.stub.push(script)
+        self.e.generate(prompt, 20)
+        self.store.note_live(conversation_id)
+
+    def test_store_prefers_longest_prefix(self):
+        self._state([5, 6, 7], [31])
+        short = self.store.keep_live()
+        self.assertIsNotNone(short)
+        self._state([5, 6, 7, 31, 8], [41])
+        long = self.store.keep_live()
+        self.assertIsNotNone(long)
+        self.assertEqual(short.token_ids, [5, 6, 7, 31])
+        self.assertEqual(long.token_ids, [5, 6, 7, 31, 8, 41])
+        self.assertIs(self.store.find([5, 6, 7, 31, 8, 41, 9]), long)   # both are prefixes; the longer one wins
+        self.assertEqual(self.store.find([9, 9]), None)
+        self.assertEqual(self.store.find([5, 6, 7, 31]), None)      # equal length is not an extension
+
+    def test_store_conversation_id_preferred(self):
+        self._state([5, 6, 7], [31], conversation_id="a")
+        ha = self.store.keep_live()
+        self.assertIsNotNone(ha)
+        self._state([5, 6, 7, 31, 8], [41], conversation_id="b")
+        hb = self.store.keep_live()
+        prompt = [5, 6, 7, 31, 8, 41, 9]
+        self.assertIs(self.store.find(prompt), hb)              # ids alone pick the longer prefix
+        self.assertIs(self.store.find(prompt, "a"), ha)         # the id wins over the prefix when it matches
+        self.assertIs(self.store.find(prompt, "nope"), hb)      # an unknown id falls back to the prefix
+
+    def test_switch_context_modes(self):
+        from yasaheni.server import switch_context
+        self._state([5, 6, 7], [31, 32])
+        live = self.e.live_ids()
+        switch_context(self.e, self.store, live + [99])         # the live state already continues the prompt
+        self.assertEqual(len(self.store), 0)
+        self.assertEqual(self.e.position(), len(live))
+        switch_context(self.e, self.store, [1, 2, 3])           # a different prompt parks the live state
+        self.assertEqual(len(self.store), 1)
+        self.e.reset()
+        switch_context(self.e, self.store, live + [77])         # the parked state is resumed
+        self.assertEqual(self.e.position(), len(live))
+        self.e.reset()
+        with mock.patch.object(self.e, "resume", side_effect=YasakaniError("resume: handle does not match this engine")):
+            with contextlib.redirect_stderr(io.StringIO()):
+                switch_context(self.e, self.store, [1, 2, 3])
+        self.assertEqual(self.e.position(), 0)                  # a failed resume falls back to a fresh prefill
+
+    def test_store_lru_eviction(self):
+        self._state([5, 6, 7], [31], conversation_id="a")
+        ha = self.store.keep_live()
+        self._state([9, 9, 9], [41], conversation_id="b")
+        hb = self.store.keep_live()
+        self.assertEqual(len(self.store), 2)
+        size = ha.nbytes
+        self.assertEqual(hb.nbytes, size)
+        self.store.budget = 2 * size + size // 2               # room for two handles, not three
+        self._state([8, 8, 8], [51], conversation_id="c")
+        hc = self.store.keep_live()
+        self.assertIsNotNone(hc)
+        self.assertEqual(len(self.store), 2)
+        self.assertTrue(ha.closed)                              # the least recently used handle was freed
+        self.assertFalse(hb.closed)
+        self.assertLessEqual(self.store.used, self.store.budget)
+
+    def test_store_oversized_handle_is_not_parked(self):
+        self._state([5, 6, 7], [31])
+        self.store.budget = 1
+        with contextlib.redirect_stderr(io.StringIO()) as log:
+            self.assertIsNone(self.store.keep())
+        self.assertIn("does not fit", log.getvalue())
+        self.assertEqual(len(self.store), 0)
+        self.assertEqual(self.store.used, 0)
+        self.assertEqual(self.e.position(), 4)                  # the engine was not touched
 
 
 if __name__ == "__main__":

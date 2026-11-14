@@ -181,6 +181,61 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(r.status, 200)
         r.read()
 
+
+    def test_park_lcp_continuation(self):
+        self.start()
+        a = [{"role": "system", "content": "rules"}, {"role": "user", "content": "one"}]
+        b = [{"role": "system", "content": "rules"}, {"role": "user", "content": "two"}]
+        ok, yes = self.ids("OK"), self.ids("Yes")
+        self.stub.push(ok + [EOS])
+        status, ra = self.chat(messages=a, max_tokens=20, seed=7)
+        self.assertEqual(status, 200)
+        reply_a = ra["choices"][0]["message"]["content"]
+        a2 = a + [{"role": "assistant", "content": reply_a}, {"role": "user", "content": "again"}]
+
+        self.engine.reset()
+        self.state.parking.clear()
+        self.stub.push(ok + [EOS])
+        status, fresh = self.chat(messages=a2, max_tokens=20, seed=7)
+        self.assertEqual(status, 200)
+        self.assertEqual(fresh["usage"]["prompt_tokens_details"]["cached_tokens"], 0)
+
+        self.engine.reset()
+        self.state.parking.clear()
+        self.stub.push(ok + [EOS])
+        self.assertEqual(self.chat(messages=a, max_tokens=20, seed=7)[0], 200)
+        live_a = self.engine.live_ids()
+        self.assertGreater(len(live_a), 1)
+        self.stub.push(yes + [EOS])
+        self.assertEqual(self.chat(messages=b, max_tokens=20, seed=7)[0], 200)     # parks A, shares only the template prefix
+        self.stub.push(ok + [EOS])
+        status, d = self.chat(messages=a2, max_tokens=20, seed=7)
+        self.assertEqual(status, 200)
+        self.assertEqual(d["choices"][0]["message"]["content"], fresh["choices"][0]["message"]["content"])
+        self.assertEqual(d["usage"]["prompt_tokens_details"]["cached_tokens"], len(live_a))   # A was resumed, not pre-filled again
+        self.assertEqual(len(self.state.parking), 2)
+
+    def test_park_lru_eviction(self):
+        self.start()
+        self.state.park_bytes = 1 << 30
+        ok = self.ids("OK")
+        convs = {c: [{"role": "user", "content": c}] for c in ("Alpha", "Bravo", "Charlie", "Delta")}
+        for c in ("Alpha", "Bravo", "Charlie"):
+            self.stub.push(ok + [EOS])
+            self.assertEqual(self.chat(messages=convs[c], max_tokens=20, seed=7, conversation_id=c.lower())[0], 200)
+        store = self.state.parking
+        self.assertEqual(len(store), 2)                                  # Alpha was parked when Bravo started
+        store.budget = store.used                                        # exactly two handles fit
+        self.stub.push(ok + [EOS])
+        self.assertEqual(self.chat(messages=convs["Delta"], max_tokens=20, seed=7, conversation_id="delta")[0], 200)
+        self.assertNotIn(("c", "alpha"), store._entries)                 # the least recently used handle was freed
+        self.assertLessEqual(store.used, store.budget)
+        a2 = convs["Alpha"] + [{"role": "assistant", "content": "OK"}, {"role": "user", "content": "more"}]
+        self.stub.push(ok + [EOS])
+        status, d = self.chat(messages=a2, max_tokens=20, seed=7, conversation_id="alpha")
+        self.assertEqual(status, 200)                                    # an evicted conversation still answers ...
+        self.assertEqual(d["usage"]["prompt_tokens_details"]["cached_tokens"], 0)   # ... from a fresh prefill
+
     def test_engine_failure_is_a_500(self):
         self.start()
         # a prompt whose first id is 7 makes the stub fail; render by raw messages is not possible, so fail via the runner

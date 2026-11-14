@@ -11,6 +11,13 @@
   the model; the calls it writes come back as ``tool_calls`` (in a stream: one chunk per finished call, with the whole arguments).
 * ``thinking_budget`` (a request field; the default comes from the environment variable YASAKANI_THINKING_BUDGET, 0 = no limit):
   when the thinking has taken that many tokens it is closed and the model goes on to the answer.
+* ``conversation_id`` (optional, non-standard, 0-200 characters): a key for the parked-context cache.  Requests that extend the
+  same conversation continue the parked state instead of prefilling the common prefix again.  Without it the cache falls back to
+  matching the longest token-id prefix.  The id is never logged and never used as a completion id.  With thinking enabled the
+  re-rendered continuation prompt can end at a different token boundary, so the parked state is not a prefix and the request
+  falls back to a fresh prefill; the cache hit is reliable with ``enable_thinking=False``.
+* Parked contexts live in pinned host memory.  ``YSKN_PARK_MB`` sets the cache budget in megabytes (default 2048, values below
+  zero mean 0, 0 disables parking); least-recently-used contexts are evicted when the budget is full.
 * Optional still-image input through ``image_url`` (configure --mmproj, --llama-dir and --vision-model).
   Not supported (answered with 400): the old ``functions`` / ``function_call`` fields, a forced
   ``tool_choice``, ``n`` > 1, ``logprobs``.
@@ -31,6 +38,7 @@ from typing import Optional
 from ._native import YasakaniError
 from .chat import (REASONING_EFFORT_ALIASES, ChatParams, ChatRunner, RequestError, Usage, clean_messages, clean_tools,
                    DEFAULT_TEMPERATURE, DEFAULT_TOP_K, DEFAULT_TOP_P)
+from .parking import ParkStore, park_budget_bytes
 
 MAX_BODY = 32 * 1024 * 1024
 LOOPBACK = ("127.0.0.1", "localhost", "[::1]")
@@ -54,6 +62,8 @@ class ApiState:
         self.cfg = cfg
         self.runner: Optional[ChatRunner] = None          # None while the model loads
         self.gen_lock = threading.Lock()
+        self.parking: Optional[ParkStore] = None          # created on the first request, when the engine exists
+        self.park_bytes = park_budget_bytes()             # YSKN_PARK_MB, read once at startup
         self.version = ""
 
 
@@ -81,9 +91,17 @@ def _num(body, key, default, lo=None, hi=None, kind=float):
 
 
 def parse_chat_request(body: dict, cfg: ServerConfig, images: bool = False) -> ChatParams:
-    """``images``: image input is configured.  Without it an image part is refused here, before the request waits for the GPU."""
+    """``images``: image input is configured.  Without it an image part is refused here, before the request waits for the GPU.
+    ``conversation_id`` is validated here but carried by the caller: it keys the parked-context cache, not the generation.
+    The id may be empty (0-200 characters); an empty id is later treated like no id and the cache uses the token-id prefix."""
     if not isinstance(body, dict):
         raise RequestError("the request body must be a JSON object")
+    conversation_id = body.get("conversation_id")
+    if conversation_id is not None:
+        if not isinstance(conversation_id, str):
+            raise RequestError("conversation_id must be a string")
+        if len(conversation_id) > 200:
+            raise RequestError("conversation_id must be at most 200 characters")
     for key in ("functions", "function_call"):
         if body.get(key):
             raise RequestError("%s is not supported; use tools" % key)
@@ -151,6 +169,25 @@ def usage_json(u: Usage) -> dict:
     if u.loop_guard:
         d["loop_guard"] = u.loop_guard
     return d
+
+
+def switch_context(engine, store: ParkStore, prompt, cid: Optional[str] = None) -> None:
+    """Continue the live state when it already extends the prompt; otherwise park it and resume the best handle.  A handle that
+    cannot be resumed is not an error: the request falls back to a fresh prefill."""
+    live = engine.live_ids()
+    if live and len(live) < len(prompt) and list(prompt[:len(live)]) == live:
+        return
+    store.keep_live()
+    h = store.find(prompt, cid)
+    if h is not None:
+        try:
+            engine.resume(h)
+        except YasakaniError as ex:
+            print("park: could not resume the context: %s" % ex, file=sys.stderr, flush=True)
+            try:
+                engine.reset()
+            except YasakaniError:
+                pass
 
 
 def make_handler(state: ApiState):
@@ -280,12 +317,12 @@ def make_handler(state: ApiState):
             self._chat(runner, body, params)
 
         def _chat(self, runner: ChatRunner, body: dict, params: ChatParams):
-            cid = "chatcmpl-" + uuid.uuid4().hex[:24]
+            reply_id = "chatcmpl-" + uuid.uuid4().hex[:24]
             created = int(time.time())
             stream = bool(body.get("stream"))
 
             def chunk(delta=None, finish=None, usage=None):
-                o = dict(id=cid, object="chat.completion.chunk", created=created, model=cfg.model_id,
+                o = dict(id=reply_id, object="chat.completion.chunk", created=created, model=cfg.model_id,
                          choices=[] if usage else [dict(index=0, delta=delta or {}, finish_reason=finish)])
                 if usage:
                     o["usage"] = usage
@@ -302,6 +339,14 @@ def make_handler(state: ApiState):
                     return self._error(400, str(ex), err_code=getattr(ex, "code", None))
                 except Exception as ex:                          # noqa: BLE001 - e.g. the image encoder failed: answer, do not drop
                     return self._error(500, str(ex)[:500] or type(ex).__name__, "server_error")
+                conv_id = body.get("conversation_id") or None
+                visual = getattr(prepared, "visual", None) is not None
+                if state.parking is None:
+                    state.parking = ParkStore(runner.engine, state.park_bytes)
+                if not visual:                                  # images are not part of a parked context
+                    switch_context(runner.engine, state.parking, prepared[0], conv_id)
+                # Only a successful run below remembers its conversation; a failed or visual run must not leave the previous id live.
+                state.parking.note_live(None)
                 try:
                     if stream:
                         self.send_response(200)
@@ -320,6 +365,8 @@ def make_handler(state: ApiState):
                                 chunk(delta={"reasoning_content" if kind == "reasoning" else "content": item})
 
                         u = runner.run(params, emit, prepared)
+                        if not visual:
+                            state.parking.note_live(conv_id)
                         chunk(delta={}, finish=u.finish)
                         if (body.get("stream_options") or {}).get("include_usage"):
                             chunk(usage=usage_json(u))
@@ -329,6 +376,8 @@ def make_handler(state: ApiState):
                     else:
                         parts = {"reasoning": [], "content": [], "tool_call": []}
                         u = runner.run(params, lambda kind, item: parts[kind].append(item), prepared)
+                        if not visual:
+                            state.parking.note_live(conv_id)
                         msg = dict(role="assistant", content="".join(parts["content"]))
                         if parts["reasoning"]:
                             msg["reasoning_content"] = "".join(parts["reasoning"])
@@ -336,11 +385,13 @@ def make_handler(state: ApiState):
                             msg["tool_calls"] = [tool_call_json(c) for c in parts["tool_call"]]
                             if not msg["content"]:
                                 msg["content"] = None
-                        self._json(200, dict(id=cid, object="chat.completion", created=created, model=cfg.model_id,
+                        self._json(200, dict(id=reply_id, object="chat.completion", created=created, model=cfg.model_id,
                                              choices=[dict(index=0, message=msg, finish_reason=u.finish)], usage=usage_json(u)))
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    state.parking.note_live(None)               # a partial run must not be parked under the previous conversation
                     self.close_connection = True               # the client went away: the engine was already stopped
                 except Exception as ex:                          # noqa: BLE001
+                    state.parking.note_live(None)               # a failed run must not be parked under the previous conversation
                     code = 400 if isinstance(ex, RequestError) else 500
                     msg = str(ex)[:500] or type(ex).__name__
                     try:
