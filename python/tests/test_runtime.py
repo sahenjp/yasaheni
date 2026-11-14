@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -51,9 +53,60 @@ class RuntimeTests(unittest.TestCase):
             root = Path(t) / "m"
             root.mkdir()
             (root / "qwen38_27b_e3x.yskn").write_bytes(b"x")
-            with self.assertRaises(Exception) as cm:
+            with self.assertRaises(R.YasakaniError) as cm:
                 R.ModelPack.load(root)
             self.assertIn("missing", str(cm.exception))
+
+    @staticmethod
+    def _manifest_folder(tmp, names, manifest=None, files=support.PLACEHOLDER_FILES):
+        root = support.make_folder(Path(tmp), files=files)
+        for f in names:
+            (root / f).write_bytes(b"x")
+        if manifest:
+            (root / manifest[0]).write_text(manifest[1], encoding="utf-8")
+        return root
+
+    def test_yasakani_manifest_is_read(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = self._manifest_folder(t, ["qwen38_27b_quality.yskn"],
+                                         ("yasakani.json", '{"files": {"weights": "qwen38_27b_quality.yskn"}, "max_ctx": 131072}'))
+            pack = R.ModelPack.load(root)
+        self.assertEqual(pack.weights.name, "qwen38_27b_quality.yskn")
+        self.assertEqual(pack.max_ctx, 131072)
+        self.assertEqual(pack.manifest.name, "yasakani.json")
+
+    def test_yasaheni_manifest_wins_when_both_exist(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = self._manifest_folder(t, ["qwen38_27b_quality.yskn", "qwen38_27b_speed.yskn"],
+                                         ("yasakani.json", '{"files": {"weights": "qwen38_27b_quality.yskn"}}'))
+            (root / "yasaheni.json").write_text('{"files": {"weights": "qwen38_27b_speed.yskn"}}', encoding="utf-8")
+            pack = R.ModelPack.load(root)
+        self.assertEqual(pack.weights.name, "qwen38_27b_speed.yskn")
+        self.assertEqual(pack.manifest.name, "yasaheni.json")
+
+    def test_no_manifest_reports_the_default_weights(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = self._manifest_folder(t, [], files=())
+            with self.assertRaises(R.YasakaniError) as cm:
+                R.ModelPack.load(root)
+        self.assertIn("missing", str(cm.exception))
+        self.assertIn("qwen38_27b_e3x.yskn", str(cm.exception))
+
+    def test_manifest_without_weights_reports_the_default(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = self._manifest_folder(t, [], ("yasakani.json", '{"files": {"draft": "bdraft2_k8.yskn"}}'), files=())
+            with self.assertRaises(R.YasakaniError) as cm:
+                R.ModelPack.load(root)
+        self.assertIn("qwen38_27b_e3x.yskn", str(cm.exception))
+
+    def test_yasakani_manifest_drives_verify(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = self._manifest_folder(t, ["qwen38_27b_quality.yskn"])
+            want = hashlib.sha256((root / "kvq_u5.bin").read_bytes()).hexdigest()
+            (root / "yasakani.json").write_text(json.dumps(
+                {"files": {"weights": "qwen38_27b_quality.yskn"}, "sha256": {"kvq_u5.bin": want}}), encoding="utf-8")
+            res = R.ModelPack.load(root).verify()
+        self.assertEqual(res, {"kvq_u5.bin": True})
 
 
 if __name__ == "__main__":

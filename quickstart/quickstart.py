@@ -707,7 +707,7 @@ def main(argv=None):
     except UnicodeEncodeError:
         ui.say("bad_path", p=mdir)
         return 2
-    have_model = os.path.isfile(os.path.join(mdir, "yasakani.json"))
+    have_model = any(os.path.isfile(os.path.join(mdir, n)) for n in ("yasaheni.json", "yasakani.json"))
     need = 2 if (a.model_dir or have_model) else MODELS[model]["need_gb"]
     free = shutil.disk_usage(home).free / 1e9
     ui.say("disk", f=free, n=need)
