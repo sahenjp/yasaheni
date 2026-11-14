@@ -8,7 +8,11 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pinned to 24.04: ubuntu-latest now resolves to Ubuntu 26.04, whose NVIDIA
+    # CUDA repository carries no 12.8 packages (cuda-nvcc-12-8 et al. are
+    # "unable to locate"), so the toolkit install step failed before any code
+    # was compiled. The ubuntu2404 repository still ships CUDA 12.8.
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -52,3 +56,11 @@ jobs:
           grep -E '\bT\s+yskn_open$' symbols.txt || {
             echo "::error::yskn_open is not exported by $so"; head -n 40 symbols.txt; exit 1; }
           echo "yskn_open is exported"
+
+      # The GGUF suites are host-only (no GPU needed), so they can gate every
+      # push, not just local runs.
+      - name: Run the GGUF test suites
+        run: |
+          cmake -S tests/gguf -B build-tests -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-tests --parallel "$(nproc)"
+          ctest --test-dir build-tests --output-on-failure
