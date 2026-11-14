@@ -1,0 +1,138 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    # Same pin as linux-build: the ubuntu2404 NVIDIA repository ships the
+    # CUDA 12.8 packages this build needs.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build build-essential
+
+      - name: Install the CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.8.0"
+          method: network
+          sub-packages: '["nvcc", "cudart", "crt"]'
+
+      - name: Build (portable architectures)
+        run: |
+          cmake -S . -B build-linux -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;120"
+          cmake --build build-linux --parallel "$(nproc)"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          pkg="yasaheni-${GITHUB_REF_NAME}-linux-x86_64"
+          mkdir -p "dist/$pkg"
+          cp build-linux/libyskn.so "dist/$pkg/"
+          cp include/yskn_abi.h "dist/$pkg/"
+          cp -r python quickstart "dist/$pkg/"
+          cp README.md BUILDING.md LICENSE NOTICE "dist/$pkg/"
+          tar -C dist -czf "$pkg.tar.gz" "$pkg"
+          ls -l "$pkg.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-package
+          path: yasaheni-*-linux-x86_64.tar.gz
+
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up the MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja
+        run: choco install ninja -y --no-progress
+
+      - name: Install the CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.8.0"
+          method: network
+          sub-packages: '["nvcc", "cudart", "crt"]'
+
+      - name: Build (portable architectures)
+        run: |
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;120"
+          cmake --build build --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $pkg = "yasaheni-$env:GITHUB_REF_NAME-windows-x86_64"
+          New-Item -ItemType Directory -Force "dist/$pkg" | Out-Null
+          Copy-Item build/yskn.dll, build/yskn.lib "dist/$pkg/"
+          Copy-Item include/yskn_abi.h "dist/$pkg/"
+          Copy-Item -Recurse python, quickstart "dist/$pkg/"
+          Copy-Item README.md, BUILDING.md, LICENSE, NOTICE "dist/$pkg/"
+          Compress-Archive -Path "dist/$pkg" -DestinationPath "$pkg.zip"
+          Get-Item "$pkg.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-package
+          path: yasaheni-*-windows-x86_64.zip
+
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd assets
+          sha256sum yasaheni-*.tar.gz yasaheni-*.zip > SHA256SUMS
+          ls -l
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          yasaheni ${GITHUB_REF_NAME}: the YASAKANI engine ported to Linux, building for Windows again, and reading GGUF directly.
+
+          Downloads
+          - yasaheni-${GITHUB_REF_NAME}-linux-x86_64.tar.gz — libyskn.so, one binary for sm_80/86/89/90/120 (Ampere through Blackwell)
+          - yasaheni-${GITHUB_REF_NAME}-windows-x86_64.zip — yskn.dll and its import library, same architectures
+          - SHA256SUMS — checksums for both archives
+
+          Install
+          1. Extract the archive for your platform.
+          2. Set the environment variable YASAKANI_DLL to the extracted library (libyskn.so on Linux, yskn.dll on Windows), or copy the library into a bin folder next to the python folder inside the archive.
+          3. pip install ./python
+          4. Bring a model: a GGUF shaped like Qwen3.8-27B (28 heads, head_dim 128), or an upstream YSKN container.
+          5. See the quickstart folder and BUILDING.md for details.
+
+          The Linux library links the CUDA runtime statically, so only the NVIDIA driver is needed at run time.
+          EOF
+          gh release create "${GITHUB_REF_NAME}" assets/* \
+            --title "yasaheni ${GITHUB_REF_NAME}" \
+            --notes-file notes.md

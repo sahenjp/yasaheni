@@ -1,0 +1,59 @@
+name: windows-build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # windows-2022 ships Visual Studio 2022 (MSVC 19.4x), which is what
+    # BUILDING.md targets.
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up the MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja
+        run: choco install ninja -y --no-progress
+
+      # Same CUDA as the Linux build: 12.8 is the first release that can emit
+      # sm_120 (RTX 5090), which the engine needs.
+      - name: Install the CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.8.0"
+          method: network
+          sub-packages: '["nvcc", "cudart", "crt"]'
+
+      - name: Show the toolchain
+        run: |
+          nvcc --version
+          cmake --version
+          ninja --version
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_CUDA_ARCHITECTURES="80;86;120"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Check the exported symbols
+        shell: pwsh
+        run: |
+          $dll = "build/yskn.dll"
+          if (-not (Test-Path $dll)) { Write-Error "$dll was not produced"; exit 1 }
+          Get-Item $dll | Format-List Name, Length
+          $exports = dumpbin /exports $dll | Out-String
+          if ($exports -notmatch "yskn_open") {
+            Write-Error "yskn_open is not exported by $dll"; exit 1 }
+          Write-Host "yskn_open is exported"
