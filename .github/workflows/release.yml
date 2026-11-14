@@ -71,7 +71,7 @@ jobs:
         with:
           cuda: "12.8.0"
           method: network
-          sub-packages: '["nvcc", "cudart"]'
+          sub-packages: '["nvcc", "cudart", "crt"]'
 
       - name: Build (portable architectures)
         run: |
@@ -134,5 +134,6 @@ jobs:
           The Linux library links the CUDA runtime statically, so only the NVIDIA driver is needed at run time.
           EOF
           gh release create "${GITHUB_REF_NAME}" assets/* \
+            -R "${GITHUB_REPOSITORY}" \
             --title "yasaheni ${GITHUB_REF_NAME}" \
             --notes-file notes.md
