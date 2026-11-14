@@ -219,7 +219,8 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
     throw std::runtime_error("Engine35: kernels are built for the 27B shapes (hidden 5120, 24 / 4 heads of 256)");
   V_ = c.vocab; H_ = c.hidden; F_ = c.ffn; nlayers_ = c.layers; eps_ = c.eps;
   max_ctx_ = ((max_ctx + 63) / 64) * 64; m_.max_ctx = max_ctx_;
-  cudaDeviceGetAttribute(&m_.sm_count, cudaDevAttrMultiProcessorCount, 0);
+  int sm_dev = 0; cudaGetDevice(&sm_dev);
+  cudaDeviceGetAttribute(&m_.sm_count, cudaDevAttrMultiProcessorCount, sm_dev);
   want_ = m_.sm_count * 8;
   { const char* e = std::getenv("YSKN_Q35_WANT"); if (e && std::atoi(e) > 0) want_ = std::atoi(e); }   
   shared_weights_ = get_shared35(path, want_, xsm_ != 0);
