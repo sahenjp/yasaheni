@@ -50,6 +50,7 @@ The result is `build\yskn.dll`.
 
 * `--fmad=false` is not cosmetic. The engine's numerics were tuned and verified with fused multiply-add contraction disabled; turning it on changes results.
 * `-Xptxas -O3` and `--allow-expensive-optimizations=true` are kept on every platform so the register allocation matches what was measured.
+* `-DYSKN_WITH_TEST_EXPORTS=ON` adds the test/probe translation units (`src/kvx_probe.cu`, `src/pm_test.cu`, `src/test_hooks.cpp`) to the library. They are off by default: nothing in the engine calls them, the public header does not declare them, and they take raw device pointers.
 * On Linux the CUDA runtime is linked statically (`CUDA::cudart_static`), so the `.so` needs only the NVIDIA driver at run time, not the toolkit.
 * Visibility is hidden by default and the C ABI is exported explicitly (`include/yskn_abi.h` uses `__attribute__((visibility("default")))`). `-Wl,--no-undefined` turns a missing symbol into a link error rather than a run-time crash.
 

@@ -50,12 +50,10 @@ add_library(yskn SHARED
   src/gguf/gguf_quant.cpp
   src/gguf/gguf_container.cpp
   src/gguf/gguf_engine.cpp
-  src/kvx_probe.cu
   src/lnord.cu
   src/loader.cpp
   src/misc_kernels.cu
   src/pfa.cu
-  src/pm_test.cu
   src/post_kernels.cu
   src/q35_atx.cu
   src/q35_atxpk.cu
@@ -70,8 +68,17 @@ add_library(yskn SHARED
   src/q35_sample.cu
   src/repack.cu
   src/specx.cpp
-  src/test_hooks.cpp
 )
+
+# Test and probe translation units. Nothing in the engine calls them, the public
+# header does not declare them, and neither the Python package nor the harness
+# uses them; they are ad-hoc kernel benchmarking aids (yskn_test_gemv,
+# yskn_pm_test, the kvx/tb probes) that take raw device pointers. Keep them out
+# of the shipped library unless they are explicitly asked for.
+option(YSKN_WITH_TEST_EXPORTS "Build the test/probe translation units into the library" OFF)
+if(YSKN_WITH_TEST_EXPORTS)
+  target_sources(yskn PRIVATE src/kvx_probe.cu src/pm_test.cu src/test_hooks.cpp)
+endif()
 target_include_directories(yskn PRIVATE src include third_party)
 target_compile_definitions(yskn PRIVATE YSKN_BUILD YSKN_KVX_MODE=3 NOMINMAX _CRT_SECURE_NO_WARNINGS)
 
