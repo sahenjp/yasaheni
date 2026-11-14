@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ctypes as C
+from contextlib import contextmanager
 import locale
 import sys
 import threading
@@ -163,6 +164,42 @@ class Engine:
             self._f["yskn_cancel"](self._e)
 
     # ---- sampling --------------------------------------------------------------------------------------------------------------
+    @property
+    def supports_visual(self) -> bool:
+        return "yskn_set_visual" in self._f
+
+    @contextmanager
+    def visual_input(self, features, slots, positions, delta):
+        """Keep visual input and generation under the same lock; always clear it afterwards.
+
+        Features are bfloat16 bits, not float16 values. The arrays stay alive until generation finishes.
+        Clearing also resets the native prefix cache, so images cannot leak into later text requests.
+        """
+        if not self.supports_visual:
+            raise YasakaniError("the engine library has no yskn_set_visual export")
+        features, slots, positions = map(np.asarray, (features, slots, positions))
+        if features.dtype != np.uint16 or features.ndim != 2 or features.shape != (slots.size, 5120):
+            raise ValueError("visual features must be bfloat16 bits with shape (image tokens, 5120)")
+        if slots.dtype != np.int32 or slots.ndim != 1 or not slots.size:
+            raise ValueError("visual slots must be a nonempty int32 vector")
+        if positions.dtype != np.int32 or positions.ndim != 2 or positions.shape[0] != 3:
+            raise ValueError("visual positions must be int32 with shape (3, prompt tokens)")
+        n_prompt = positions.shape[1]
+        if n_prompt >= self.max_ctx or np.any(slots < 0) or np.any(slots >= n_prompt) or len(np.unique(slots)) != len(slots):
+            raise ValueError("invalid visual slots or prompt length")
+        if np.any(positions < 0) or np.any(positions >= self.max_ctx) or int(delta) != int(positions.max()) + 1 - n_prompt:
+            raise ValueError("invalid visual positions or delta")
+        features, slots, positions = map(np.ascontiguousarray, (features, slots, positions))
+        with self._lock:
+            self._need_open()
+            f = self._f["yskn_set_visual"]
+            try:
+                self._check(f(self._e, features.ctypes.data, slots.ctypes.data, len(slots), positions.ctypes.data,
+                              n_prompt, int(delta)))
+                yield
+            finally:
+                self._check(f(self._e, None, None, 0, None, 0, 0))
+
     def set_sampling(self, s: Sampling) -> Sampling:
         s = s.normalized()
         with self._lock:

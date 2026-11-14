@@ -14,7 +14,8 @@ records themselves are in [`bench/`](../bench/).
 * The quality table evaluates the same two models with an FP16 key-value (KV) cache. That is not the KV condition of the speed tables, which
   use KV5. YASAKANI's two rows of that table were measured with a research build of the engine, which can use an FP16 KV cache and return
   the distribution over the whole vocabulary; the weights are the same data as in the released model files. The `yskn.dll` of this
-  release was not used for the quality table.
+  release was not used for the quality table. It was measured with the released `yskn.dll` afterwards (November 14, 2026): see
+  "The released engine" at the end of the section on quality.
 * "16.78 GiB" comes from the long-context test of the fastest model.
 * The code-edit demonstration (the uncut screen recording) was made with the fastest model on November 8: 5.56 s from sending the input to the
   arrival of the last output.
@@ -29,6 +30,13 @@ Thinking off is greedy, 2 runs each. The table in the README is the average afte
 left out by one saved rule shared by all engines. The exclusion can change the number of tasks in a category. For the fastest model's "Code",
 the value is 900 tok/s before the exclusion and 529 tok/s after it. We do not use the former as a representative figure for practical code
 generation. The table before the exclusion is kept below.
+
+On November 14, 2026 the rule for repetition was tightened and the table of the README was made again: for story and translation, a run is
+also left out when lines that occur more than once make up 20% or more of its lines, for every engine alike. Only the "Story" column
+changed (fastest model 285 -> 201, mkyt 204 -> 181, vLLM 150 -> 148, llama.cpp 139 -> 133). The table is the output of
+[`tools/speed/tables_strict.py`](../tools/speed/tables_strict.py);
+[`tools/speed/SPEED_TABLES_STRICT.md`](../tools/speed/SPEED_TABLES_STRICT.md) also lists the 12 prompts one by one. The first tally is kept in
+[`bench/20261108/tables/`](../bench/20261108/tables/).
 
 Thinking on uses temperature 1.0, top-p 0.95, top-k 20, min-p 0. It is a comparison of records: the fastest run of each task is chosen and
 averaged per category. YASAKANI's value is chosen from 5 runs and the other engines' from 2, so the number of tries is not equal. The table
@@ -47,15 +55,15 @@ November 6. This does not rank the latest version of every program, or every use
 
 | Engine | Code | Story | Translation | Structured | Code edit | JSONL edit | Long JSONL |
 |---|---|---|---|---|---|---|---|
-| YASAKANI fastest model | 529 | 285 | 494 | 909 | 1,222 | 1,156 | 1,260 |
+| YASAKANI fastest model | 529 | 201 | 494 | 909 | 1,222 | 1,156 | 1,260 |
 | YASAKANI quality model | 486 | 179 | 483 | 930 | 1,136 | 1,151 | 1,160 |
 | MegaCapybara 1.39 Tiny | 465 | 164 | 268 | 599 | 441 | 658 | 666 |
-| mkyt v0.3.2 | 395 | 204 | 374 | 555 | 423 | 634 | 639 |
+| mkyt v0.3.2 | 395 | 181 | 374 | 555 | 423 | 634 | 639 |
 | ignis v0.9.6 | 330 | 167 | 298 | 439 | 331 | 510 | 514 |
 | NInfer (November 2 build) | 264 | 123 | 257 | 386 | 295 | 443 | 438 |
-| vLLM 0.31.0 | 290 | 150 | 261 | 354 | 241 | 426 | 431 |
+| vLLM 0.31.0 | 290 | 148 | 261 | 354 | 241 | 426 | 431 |
 | SGLang 0.5.22 | 252 | 129 | 246 | 371 | 430 | 466 | 451 |
-| llama.cpp b11700 | 242 | 139 | 232 | 337 | 244 | 360 | 362 |
+| llama.cpp b11700 | 242 | 133 | 232 | 337 | 244 | 360 | 362 |
 | TensorFold 0.6.6 | 181 | 104 | 172 | 405 | 383 | 408 | 261 |
 
 ## Thinking on: the table of the README (fastest run of each task, tok/s)
@@ -162,7 +170,26 @@ auxiliary layers; the whole file is 13.15 GB. For UD-IQ3_XXS the whole file, 10.
 
 The score of every configuration, the logs, the scoring scripts and how the distribution of each engine was obtained are in
 [`bench/20261108/quality/`](../bench/20261108/quality/), together with two more Unsloth files that are not in the table above. The twenty
-transcripts and the reference are not published, so the table cannot be measured again from the records alone.
+transcripts are in [`tools/quality/`](../tools/quality/) (added on November 14, 2026), together with a program that makes the reference from
+the original model and a program that measures a released model with the released engine. The reference file of this table itself (about
+10 GB) is not published; a reference made with that program from the original model gives the same distributions (KL divergence between
+the two: less than 0.000001).
+
+### The released engine (added November 14, 2026)
+
+The two YASAKANI rows above were measured with a research build and an FP16 KV cache. The released `yskn.dll` is built for its 8-bit KV
+cache only, and the published source builds only this configuration, so those rows cannot be repeated with the released engine. On the
+same 20 windows and against the same reference, the engine of release 0.1.1 gives:
+
+| Model | KV cache | KL on thinking text↓ | Top-1 agreement↑ |
+|---|---|---|---|
+| quality model | KV5 (the engine as the package starts it) | 0.0126 | 95.35% |
+| quality model | 8-bit, without the KV5 compression | 0.0125 | 95.23% |
+| fastest model | KV5 (the engine as the package starts it) | 0.0309 | 92.98% |
+| fastest model | 8-bit, without the KV5 compression | 0.0307 | 93.06% |
+
+Against a reference made from the original model with Hugging Face transformers (`tools/quality/make_reference.py`), the two KV5 rows
+are 0.0126 / 95.35% and 0.0309 / 92.98%. How to repeat this: [`tools/quality/README.md`](../tools/quality/README.md).
 
 ## KV5 (the compressed key-value cache) with the fastest model
 
@@ -182,7 +209,7 @@ cache has not been measured.
 
 ## Supported environment
 
-This release covers text chat with Qwen3.8-27B on Windows 11 and the RTX 5090. Image input is future work. Tool calling through the API is a preview: it is in the package that comes with the harness, not in the 0.1.0 package.
+This release covers text chat with Qwen3.8-27B on Windows 11 and the RTX 5090. Image input is optional since 0.1.2 (a community contribution, [#4](https://github.com/yasakani-dev/yasakani/pull/4)); we have not measured image quality, and it is not part of the measurements on this page. Tool calling through the API is in the package since 0.1.1; it is not part of the measurements on this page.
 Which configurations and context lengths work on 24 GB and 16 GB GPUs will be checked on each actual card; operation is not promised from
 the file size alone, and the conversation history and working memory are included in that check. The executables are not code-signed, so
 Windows may show a warning.

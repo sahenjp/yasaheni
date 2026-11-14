@@ -21,6 +21,11 @@ classifiers = [
 [project.scripts]
 yasaheni = "yasaheni.cli:main"
 
+[project.optional-dependencies]
+# Image input: vision.py decodes JPEG/PNG itself, but the server needs Pillow
+# to resize request images.
+vision = ["Pillow>=10"]
+
 [tool.setuptools]
 packages = ["yasaheni"]
 

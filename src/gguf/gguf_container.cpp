@@ -311,7 +311,7 @@ void GgufContainer::materialise() {
   // tensor and reused through quantize_tensor's 'shared' argument. Each tensor
   // still carries its own lut16 (f16 of q*gamma) and its own scale16, so the
   // reader recovers gamma per tensor exactly as it does for a per-tensor
-  // codebook (docs/GGUF_DESIGN.md 3.2).
+  // codebook (docs/FORMAT.md).
   {
     const WeightSpec* sample = &weights.front();
     for (const WeightSpec& w : weights) {

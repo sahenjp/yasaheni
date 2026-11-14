@@ -5,9 +5,12 @@
 __pycache__/
 *.pyc
 *.egg-info/
-# model weights are never committed
+# Model weights are never committed. The fixtures under tools/ and tests/ are
+# small and are needed by the test suite, so they are let back in.
 *.gguf
 *.yskn
 *.safetensors
 *.bin
 !tests/**/*.gguf
+!tools/testdata/*.yskn
+!tools/convert/data/*.bin

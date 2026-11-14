@@ -1,0 +1,13 @@
+{
+ "file": "q_released_head.yskn",
+ "bytes": 12365242368,
+ "sha256": "6493983cf95391823dfd8b4477733649fc20b0ddfd39fdc773cf2fa0ed46d18b",
+ "data_sha256": "b6347c86744177cfb83a1eb9fc3f84087ca9f939940b84aaf08404aede5e2823",
+ "body_bits": {
+  "6": 112,
+  "8": 288
+ },
+ "head": "copied from qwen38_27b_quality.yskn",
+ "embedding": "converted",
+ "seconds": 286.9846286999964
+}

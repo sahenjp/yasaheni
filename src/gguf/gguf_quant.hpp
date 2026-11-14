@@ -3,14 +3,13 @@
 //
 // GGUF -> engine tensor bridge: the host-side *encoder*.
 //
-// The engine consumes a quantised stream (see docs/GGUF_DESIGN.md §2 and
-// §5.4): a 4096-entry pair codebook, a per-row scale, and a bit-packed trellis
+// The engine consumes a quantised stream (see docs/FORMAT.md): a 4096-entry pair codebook, a per-row scale, and a bit-packed trellis
 // stream in layout:"warp". This header produces exactly that representation
 // from plain float32 weights, so a GGUF file can be turned into the in-memory
 // tensors the GEMV kernels already know how to run (src/loader.cpp,
 // src/v2_decode.cuh, src/repack.cu).
 //
-// Pipeline (docs/GGUF_DESIGN.md §5.4 "D. Per-matrix pipeline"):
+// Pipeline (docs/GGUF.md, "What the encoder implements"):
 //
 //   W  --rotate_matrix-->  A = diag(so)·(1/√512)H·W·(1/√512)H·diag(si)
 //   A  --per-row scale-->  B = A / tau,  tau[r] = max_k |A[r][k]| / 127
@@ -37,7 +36,7 @@ namespace yskn::gguf {
 //   kHadamardBlock  src/a8_prologue.cuh:41-51   (fwht512_blocks)
 //   kLutBits        src/v2_decode.cuh:7         (L_BITS = 12)
 //   kSeqCols        src/v2_decode.cuh:88-95     (32*K bits of ring per group)
-//   kStepsPerSeq    docs/GGUF_DESIGN.md §2.2    (256 cols / d=2)
+//   kStepsPerSeq    docs/FORMAT.md              (256 cols / d=2)
 //   kTileRows       src/loader.cpp:39           (64-row tiles)
 // ---------------------------------------------------------------------------
 constexpr int kHadamardBlock = 512;

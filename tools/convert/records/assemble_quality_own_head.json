@@ -1,0 +1,13 @@
+{
+ "file": "qwen38_27b_quality.yskn",
+ "bytes": 12365242368,
+ "sha256": "0bfcb5e47a85453928d17e001a436e867498239c1226c279facb4e531421c9b0",
+ "data_sha256": "bbf3f47e8940296ef18ea00880846813a65802db37de1fd46f2554f16475ea76",
+ "body_bits": {
+  "6": 112,
+  "8": 288
+ },
+ "head": "converted",
+ "embedding": "converted",
+ "seconds": 302.10064409999904
+}

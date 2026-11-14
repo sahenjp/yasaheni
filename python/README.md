@@ -1,6 +1,6 @@
-# yasakani (Python package)
+# yasaheni (Python package)
 
-Run **Qwen3.8-27B** on one **NVIDIA RTX 5090** under **Windows** with the YASAKANI engine library (`yskn.dll`).
+Run **Qwen3.8-27B** on one **NVIDIA GPU** under **Windows or Linux** with the YASAKANI engine library (`yskn.dll` on Windows, `libyskn.so` elsewhere).
 
 This package is the part you talk to: a local **OpenAI-compatible server**, a **terminal chat**, a **benchmark**, and two checks that tell you
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
@@ -12,11 +12,11 @@ Status: first public release (`0.1.0`). Text only. One request is generated at a
 
 | | |
 |---|---|
-| GPU | NVIDIA **RTX 5090** (the engine is built for this card only) and a current NVIDIA driver |
-| OS | **Windows 11**, 64-bit (the only version tested), with the *Microsoft Visual C++ 2015-2022 x64 runtime* ([download](https://aka.ms/vs/17/release/vc_redist.x64.exe)) |
+| GPU | NVIDIA **RTX 5090** is what the kernels were tuned for. This fork also builds for `sm_80/86/89/90/120`, so Ampere, Ada and Hopper cards work, with two caveats: PDL is skipped below `sm_90`, and the engine needs a current NVIDIA driver |
+| OS | **Linux** or **Windows 11**, 64-bit. On Windows the *Microsoft Visual C++ 2015-2022 x64 runtime* is needed ([download](https://aka.ms/vs/17/release/vc_redist.x64.exe)); on Linux the CUDA runtime is linked statically, so only the driver is needed at run time |
 | Python | 3.10 or newer |
 | Disk | about 15 GB for the quality model folder, about 13 GB for the fastest model folder |
-| Engine library | `yskn.dll` from the release page |
+| Engine library | `yskn.dll` from the release page, or a `libyskn.so` built with `scripts/build-linux.sh` (`build/bin/libyskn.so` is found automatically) |
 
 You do **not** need the CUDA Toolkit, PyTorch, or a C++ compiler.
 
@@ -146,7 +146,7 @@ means running an engine configuration that the self-check and the published numb
 * *engine library not found / could not be loaded* - give `--dll`, and install the Visual C++ runtime linked above.
 * *could not open the model ... not enough free GPU memory* - close other programs that use the GPU, or lower `--max-ctx`.
 * *much slower than the published numbers* - look for the warning *the GPU memory is almost full* at start. When other programs use GPU memory
-  and it runs out, Windows keeps part of the model in ordinary memory; there is no error, but generation becomes several times slower.
+  and it runs out, the driver moves part of the model to ordinary system memory; there is no error, but generation becomes several times slower.
   Close the other programs, or lower `--max-ctx`.
 * *only thinking, no answer* - the length limit was reached while the model was still thinking; see the note on `max_tokens` above
   (`/effort medium`, `/effort low` or `/think off` in `yasakani chat`).

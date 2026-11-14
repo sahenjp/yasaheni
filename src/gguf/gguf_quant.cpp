@@ -2,7 +2,7 @@
 // Copyright (c) 2026 the YASAKANI authors
 //
 // GGUF -> engine tensor bridge, host-side encoder. See gguf_quant.hpp for the
-// contract and docs/GGUF_DESIGN.md §5.4 for the pipeline this implements.
+// contract and docs/GGUF.md for the pipeline this implements.
 #include "gguf_quant.hpp"
 
 #include <algorithm>
@@ -115,7 +115,7 @@ inline void write_bits(uint32_t* w, int pos, int width, uint32_t v) {
   if (sh + width > 32) w[idx + 1] |= v >> (32 - sh);
 }
 
-// Same read_window as docs/GGUF_DESIGN.md §2.2.
+// Same read_window as docs/FORMAT.md describes.
 inline uint32_t read_window(const uint32_t* w, int start, int width) {
   const int idx = start >> 5, sh = start & 31;
   uint32_t v = w[idx] >> sh;

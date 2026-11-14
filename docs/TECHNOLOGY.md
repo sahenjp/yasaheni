@@ -3,7 +3,7 @@
 Technical notes by the author, written as a map for people who read the source code in this repository.
 日本語: [TECHNOLOGY.ja.md](TECHNOLOGY.ja.md)
 
-* Scope: version 0.1.0. Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B.
+* Scope: versions 0.1.0 to 0.1.2 (the engine library is the same in all three). Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B.
 * Unless noted otherwise, the numbers here were measured on 12 November 2026 on the author's computer with the public `yskn.dll` and the
   fastest model (context 16,384, temperature 0, 768 tokens each, four tasks). Comparisons with other engines, and their conditions, are in
   [MEASUREMENTS.md](MEASUREMENTS.md).
@@ -97,7 +97,8 @@ The code that reads the format is in `src/format.hpp` and `src/loader.cpp`.
 
 ### 3.2 How the codes are made (the conversion)
 
-The conversion tool is not part of this release. This is how it works.
+The conversion program is in [`tools/convert/`](../tools/convert/) (added on November 14, 2026), with the data it needs and what
+we got when we ran it again. This is how it works.
 
 1. **Collect statistics.** Calibration text is run through the original model, and two statistics are taken for every matrix:
    * input side: the second-order statistics of the values that enter the matrix;
@@ -107,7 +108,9 @@ The conversion tool is not part of this release. This is how it works.
 3. **Choose the path through the trellis.** Viterbi (dynamic programming) picks the sequence of codes with the smallest error.
 4. **Feed the error back.** The error made by rounding is taken up by the weights that have not been rounded yet. This is done in the
    direction of the inputs (columns) and in the direction of the outputs (rows).
-5. Converting the 64 layers and 400 matrices takes about 75 minutes on one RTX 5090.
+5. On one RTX 5090 the 64 layers (the statistics and the rounding of the 400 matrices) took about 75 minutes with one bit width per
+   matrix, as the quality model has them (November 7, 2026, with the research scripts). The program in `tools/convert/` rounds every
+   matrix at both bit widths, from which both model files are assembled; that took 1 hour 55 minutes (November 14, 2026, see its README).
 
 The calibration text is 96 windows of WikiText and 96 windows of **the model's own thinking transcripts**. Thinking text is included
 because this model spends most of its output on thinking. With the output-side statistics and the thinking text together, and with the
@@ -307,6 +310,7 @@ time are expanded to int8 and reused (`src/q35_g6.cu`). A request that starts wi
 ## 10. What this release does not have, and limits
 
 * Only the RTX 5090, Windows 11 and Qwen3.8-27B are supported. The kernels are written for this card and the shape of this model.
-* There is no tool to convert another model to the YASAKANI format.
+* The converter ([`tools/convert/`](../tools/convert/)) knows the layers of Qwen3.8-27B only; another model needs changes to it and to
+  the engine.
 * One request is generated at a time.
 * The numbers here come from one computer. They change with the task, the context length and what else is using the GPU.

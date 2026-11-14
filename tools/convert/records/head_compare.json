@@ -1,0 +1,21 @@
+{
+ "note": "the output matrix (lm_head) made by tools/convert/yskn_convert.py, symbol by symbol against the released one. 'statistic_of_the_original_model': the statistic this program takes (the output of the final norm of the original model on the 192 calibration windows). 'statistic_of_the_released_one': the statistic the released output matrix was made with on 2026-10-08 (the output of the final norm behind an earlier conversion in which every matrix had 3 bits, 128 WikiText windows; not published), given with --head-stat. 'error' is tr(D H D^T) / tr(W H W^T) under the statistic used.",
+ "measured": "2026-11-14",
+ "statistic_of_the_original_model": {
+  "symbols": 635699200,
+  "symbols_different": 308401136,
+  "rows": 248320,
+  "scales_different": 0,
+  "error": 0.0008141674202956185
+ },
+ "statistic_of_the_released_one": {
+  "symbols": 635699200,
+  "symbols_different": 67121,
+  "rows": 248320,
+  "scales_different": 0,
+  "error": 0.0006351448153133412
+ },
+ "released": {
+  "error": 0.0006351419575612286
+ }
+}

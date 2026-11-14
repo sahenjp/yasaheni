@@ -52,9 +52,12 @@ We have not found the cause yet. The release does not promise bit-identical text
 
 ## Which GPUs, which systems?
 
-Only **Windows 11 and the RTX 5090** (32 GB) are supported and tested. The kernels are written for this card (compute capability 12.0). Other
-NVIDIA cards have not been tested with this release; results from them are welcome (see [CONTRIBUTING.md](../CONTRIBUTING.md)). Linux, macOS and
-AMD GPUs are not supported, and there is no Linux build. Extending support - 24 GB and 16 GB RTX cards first, then AMD and Mac - is what the
+Only **Windows 11 and the RTX 5090** (32 GB) are supported and tested. The kernels are built for compute capability 12.0, which
+the whole RTX 50 series shares; on any card other than the RTX 5090 the quickstart asks whether to continue (pressing Enter alone
+stops it). Other NVIDIA cards have not been tested with
+this release; results from them are welcome (see [CONTRIBUTING.md](../CONTRIBUTING.md)). macOS and
+AMD GPUs are not supported. On Linux the engine can be built from source (a community contribution, [#3](https://github.com/yasakani-dev/yasakani/pull/3), checked on
+WSL2 / Ubuntu 24.04 with an RTX 5090); a prebuilt Linux release with a launcher is one of the campaign's goals. Extending support - 24 GB and 16 GB RTX cards first, then AMD and Mac - is what the
 crowdfunding campaign is for; the order and the conditions are on the [campaign page](https://camp-fire.jp/projects/992233/view).
 
 ## How much memory and disk does it need?
@@ -88,14 +91,17 @@ API key will do). If it does not connect:
 * An app inside Docker, or anything outside this computer: by default only connections addressed to `127.0.0.1` are accepted. Start the server
   with `yasakani serve --host 0.0.0.0 --api-key YOUR_KEY` and give the app that key.
 * Apps that call the server straight from a web page: calls from other pages are refused, for safety.
-* Apps that depend on tool / function calling (coding agents, for example): the 0.1.0 package answers a request with `tools` with 400. The
-  harness on the release page brings a preview of the next package, whose server supports `tools`, together with an agent screen (see
-  "Use it as an agent" in the [README](../README.md)).
+* Apps that depend on tool / function calling (coding agents, for example): supported since 0.1.1. The server takes `tools` with
+  `tool_choice` `auto` or `none` and returns the calls as `tool_calls`; a forced `tool_choice` and the old `functions` field are answered
+  with 400. Version 0.1.0 answered every request with `tools` with 400: if you use 0.1.0, put a newer quickstart (0.1.1 or later) into the same folder
+  and run `START.cmd` again (the model is not downloaded again). Tool calling is new and has been tested far less than plain chat.
+  An agent screen is in the harness (see "Use it as an agent" in the [README](../README.md)).
 
 ## Can I use other models, for example Qwen4?
 
-Not in this release: it runs Qwen3.8-27B only. The tool that converts a model to the YASAKANI file format is **not** part of this release; the
-published models work as they are. Whether other models can be supported is decided one by one, and nothing is promised.
+Not in this release: it runs Qwen3.8-27B only. The program that made the two model files ([tools/convert/](../tools/convert/), added on
+November 14, 2026) knows the layers of Qwen3.8-27B only, and the engine runs this model only, so another model needs changes in both.
+Whether other models can be supported is decided one by one, and nothing is promised.
 
 ## Does it send my prompts anywhere?
 
@@ -111,8 +117,10 @@ downloaded with the one on the release page, and run `yasakani verify` on the mo
 ## Can I use it from my own programs?
 
 Yes: it serves the OpenAI chat-completions API on `http://127.0.0.1:8765/v1`. Supported request fields, the way the thinking text is returned and the
-loop guard are described in [python/README.md](../python/README.md). It generates one request at a time; images, `n` above 1
-and `logprobs` are not supported, and tool / function calling only in the preview package of the harness.
+loop guard are described in [python/README.md](../python/README.md). It generates one request at a time; `n` above 1
+and `logprobs` are not supported. Tool / function calling is supported since 0.1.1 (`tools` with `tool_choice` `auto` or `none`).
+Images are accepted since 0.1.2 through the optional image input (Windows only; a community contribution, [#4](https://github.com/yasakani-dev/yasakani/pull/4); see
+[python/README.md](../python/README.md#image-input-optional)).
 
 ## Can I use it commercially?
 

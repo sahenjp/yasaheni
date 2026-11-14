@@ -1,0 +1,13 @@
+{
+ "file": "qwen38_27b_speed.yskn",
+ "bytes": 10311344128,
+ "sha256": "fd9e2f0257cd382d541e726420977fb906418ea257bc6273e08fe919d7c39670",
+ "data_sha256": "b8d9bd997e6dff4d0be11a8c0f6c15faa28ca1ab7e8cd4d39fa7f452e37e17b3",
+ "body_bits": {
+  "6": 400,
+  "8": 0
+ },
+ "head": "converted",
+ "embedding": "converted",
+ "seconds": 266.64673149999726
+}

@@ -7,12 +7,19 @@
   machines use ``--host 0.0.0.0 --api-key KEY``.
 * One request is generated at a time; the others wait.
 * A stream carries one chunk per token (several chunks arrive together, about 64 times a second on Windows).
-* Text only.  Not supported (answered with 400): images, ``tools`` / ``functions``, ``n`` > 1, ``logprobs``.
+* Tool calling: ``tools`` (functions) with ``tool_choice`` "auto" or "none".  The model's own chat template describes the tools to
+  the model; the calls it writes come back as ``tool_calls`` (in a stream: one chunk per finished call, with the whole arguments).
+* ``thinking_budget`` (a request field; the default comes from the environment variable YASAKANI_THINKING_BUDGET, 0 = no limit):
+  when the thinking has taken that many tokens it is closed and the model goes on to the answer.
+* Optional still-image input through ``image_url`` (configure --mmproj, --llama-dir and --vision-model).
+  Not supported (answered with 400): the old ``functions`` / ``function_call`` fields, a forced
+  ``tool_choice``, ``n`` > 1, ``logprobs``.
 """
 from __future__ import annotations
 
 import hmac
 import json
+import os
 import socket
 import sys
 import threading
@@ -22,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
 from ._native import YasakaniError
-from .chat import (REASONING_EFFORT_ALIASES, ChatParams, ChatRunner, RequestError, Usage, clean_messages,
+from .chat import (REASONING_EFFORT_ALIASES, ChatParams, ChatRunner, RequestError, Usage, clean_messages, clean_tools,
                    DEFAULT_TEMPERATURE, DEFAULT_TOP_K, DEFAULT_TOP_P)
 
 MAX_BODY = 32 * 1024 * 1024
@@ -31,9 +38,15 @@ LOOPBACK = ("127.0.0.1", "localhost", "[::1]")
 
 class ServerConfig:
     def __init__(self, host="127.0.0.1", port=8765, api_key=None, model_id="qwen3.8-27b", default_max_tokens=32768,
-                 max_tokens_cap=None):
+                 max_tokens_cap=None, default_thinking_budget=None):
         self.host, self.port, self.api_key, self.model_id = host, int(port), api_key, model_id
         self.default_max_tokens, self.max_tokens_cap = int(default_max_tokens), max_tokens_cap
+        if default_thinking_budget is None:               # no command-line option yet: the starter of the harness sets the variable
+            try:
+                default_thinking_budget = int(os.environ.get("YASAKANI_THINKING_BUDGET") or 0)
+            except ValueError:
+                default_thinking_budget = 0
+        self.default_thinking_budget = max(0, int(default_thinking_budget))
 
 
 class ApiState:
@@ -67,12 +80,19 @@ def _num(body, key, default, lo=None, hi=None, kind=float):
     return v
 
 
-def parse_chat_request(body: dict, cfg: ServerConfig) -> ChatParams:
+def parse_chat_request(body: dict, cfg: ServerConfig, images: bool = False) -> ChatParams:
+    """``images``: image input is configured.  Without it an image part is refused here, before the request waits for the GPU."""
     if not isinstance(body, dict):
         raise RequestError("the request body must be a JSON object")
-    for key in ("tools", "functions", "tool_choice", "function_call"):
+    for key in ("functions", "function_call"):
         if body.get(key):
-            raise RequestError("%s is not supported yet" % key)
+            raise RequestError("%s is not supported; use tools" % key)
+    tools = clean_tools(body.get("tools"))
+    choice = body.get("tool_choice")
+    if choice == "none":
+        tools = None
+    elif choice not in (None, "auto"):
+        raise RequestError("tool_choice %s is not supported; use \"auto\" or \"none\"" % json.dumps(choice)[:80])
     if body.get("logprobs"):
         raise RequestError("logprobs is not supported")
     if body.get("n") not in (None, 1):
@@ -80,7 +100,7 @@ def parse_chat_request(body: dict, cfg: ServerConfig) -> ChatParams:
     rf = body.get("response_format")
     if isinstance(rf, dict) and rf.get("type") not in (None, "text"):
         raise RequestError("response_format %r is not supported" % rf.get("type"))
-    messages = clean_messages(body.get("messages"))
+    messages = clean_messages(body.get("messages"), images=images)
     mt = body.get("max_completion_tokens", body.get("max_tokens"))
     max_tokens = cfg.default_max_tokens if mt is None else _num({"v": mt}, "v", None, 1, None, int)
     if cfg.max_tokens_cap:
@@ -93,11 +113,18 @@ def parse_chat_request(body: dict, cfg: ServerConfig) -> ChatParams:
     kw = dict(body.get("chat_template_kwargs") or {})
     if not isinstance(kw, dict):
         raise RequestError("chat_template_kwargs must be an object")
+    thinking = body.get("thinking")                       # {"type": "enabled" | "disabled"}, as some clients send it
+    if isinstance(thinking, dict) and thinking.get("type") in ("enabled", "disabled"):
+        kw.setdefault("enable_thinking", thinking["type"] == "enabled")
+    if isinstance(body.get("enable_thinking"), bool):
+        kw.setdefault("enable_thinking", body["enable_thinking"])
     eff = body.get("reasoning_effort")
     if eff is not None:
         if eff not in REASONING_EFFORT_ALIASES:
             raise RequestError("reasoning_effort must be one of low, medium, high, xhigh")
         kw.setdefault("reasoning_effort", REASONING_EFFORT_ALIASES[eff])
+    tb = body.get("thinking_budget", kw.pop("thinking_budget", None))
+    thinking_budget = cfg.default_thinking_budget if tb is None else _num({"thinking_budget": tb}, "thinking_budget", 0, 0, None, int)
     seed = body.get("seed")
     return ChatParams(
         messages=messages, max_tokens=max_tokens,
@@ -107,7 +134,14 @@ def parse_chat_request(body: dict, cfg: ServerConfig) -> ChatParams:
         min_p=_num(body, "min_p", 0.0, 0.0, 1.0),
         seed=None if seed is None else _num(body, "seed", 0, None, None, int),
         stop=list(stop), ignore_eos=bool(body.get("ignore_eos", False)), loop_guard=body.get("loop_guard", True) is not False,
-        template_kwargs=kw)
+        thinking_budget=thinking_budget, template_kwargs=kw, tools=tools)
+
+
+def tool_call_json(call: dict, index: Optional[int] = None) -> dict:
+    """{"name", "arguments"} from the chat runner -> an OpenAI tool call (the arguments as a JSON string)."""
+    d = dict(id="call_" + uuid.uuid4().hex[:24], type="function",
+             function=dict(name=call["name"], arguments=json.dumps(call["arguments"], ensure_ascii=False)))
+    return d if index is None else dict(index=index, **d)
 
 
 def usage_json(u: Usage) -> dict:
@@ -155,8 +189,8 @@ def make_handler(state: ApiState):
             self.end_headers()
             self.wfile.write(b)
 
-        def _error(self, code, message, kind="invalid_request_error", close=False):
-            self._json(code, dict(error=dict(message=message, type=kind, code=code)), close)
+        def _error(self, code, message, kind="invalid_request_error", close=False, err_code=None):
+            self._json(code, dict(error=dict(message=message, type=kind, code=err_code or code)), close)
 
         def _drain(self):
             try:
@@ -205,6 +239,7 @@ def make_handler(state: ApiState):
                 body = dict(status="ok" if state.runner else "loading", version=state.version, model=cfg.model_id)
                 if state.runner:
                     body["max_context_tokens"] = state.runner.engine.max_ctx
+                    body["thinking_budget"] = cfg.default_thinking_budget
                 return self._json(code, body)
             if self._unauthorized():
                 return
@@ -237,7 +272,7 @@ def make_handler(state: ApiState):
                 return self._error(413, "request body too large or length missing", "invalid_request_error", close=True)
             try:
                 body = json.loads(self.rfile.read(n) or b"{}")
-                params = parse_chat_request(body, cfg)
+                params = parse_chat_request(body, cfg, images=getattr(runner, "vision", None) is not None)
             except json.JSONDecodeError:
                 return self._error(400, "the request body is not valid JSON")
             except RequestError as ex:
@@ -257,7 +292,16 @@ def make_handler(state: ApiState):
                 self.wfile.write(b"data: " + json.dumps(o, ensure_ascii=False).encode("utf-8") + b"\n\n")
                 self.wfile.flush()
 
+            # One request at a time.  With image input, prepare_checked also reads and encodes the images on the CPU, inside this
+            # lock: while an image is encoded (about 15 s at the default limit of 1,024 image tokens on a 16-core CPU) no other
+            # request is served and nothing is sent to this client yet.  Moving the encode out of the lock is a later change.
             with state.gen_lock:
+                try:
+                    prepared = runner.prepare_checked(params)        # before any header: a request that cannot be served gets a plain 400
+                except RequestError as ex:
+                    return self._error(400, str(ex), err_code=getattr(ex, "code", None))
+                except Exception as ex:                          # noqa: BLE001 - e.g. the image encoder failed: answer, do not drop
+                    return self._error(500, str(ex)[:500] or type(ex).__name__, "server_error")
                 try:
                     if stream:
                         self.send_response(200)
@@ -266,7 +310,16 @@ def make_handler(state: ApiState):
                         self.send_header("Connection", "close")
                         self.end_headers()
                         chunk(delta=dict(role="assistant"))
-                        u = runner.run(params, lambda kind, text: chunk(delta={"reasoning_content" if kind == "reasoning" else "content": text}))
+                        n_calls = [0]
+
+                        def emit(kind, item):
+                            if kind == "tool_call":
+                                chunk(delta={"tool_calls": [tool_call_json(item, n_calls[0])]})
+                                n_calls[0] += 1
+                            else:
+                                chunk(delta={"reasoning_content" if kind == "reasoning" else "content": item})
+
+                        u = runner.run(params, emit, prepared)
                         chunk(delta={}, finish=u.finish)
                         if (body.get("stream_options") or {}).get("include_usage"):
                             chunk(usage=usage_json(u))
@@ -274,11 +327,15 @@ def make_handler(state: ApiState):
                         self.wfile.flush()
                         self.close_connection = True
                     else:
-                        parts = {"reasoning": [], "content": []}
-                        u = runner.run(params, lambda kind, text: parts[kind].append(text))
+                        parts = {"reasoning": [], "content": [], "tool_call": []}
+                        u = runner.run(params, lambda kind, item: parts[kind].append(item), prepared)
                         msg = dict(role="assistant", content="".join(parts["content"]))
                         if parts["reasoning"]:
                             msg["reasoning_content"] = "".join(parts["reasoning"])
+                        if parts["tool_call"]:
+                            msg["tool_calls"] = [tool_call_json(c) for c in parts["tool_call"]]
+                            if not msg["content"]:
+                                msg["content"] = None
                         self._json(200, dict(id=cid, object="chat.completion", created=created, model=cfg.model_id,
                                              choices=[dict(index=0, message=msg, finish_reason=u.finish)], usage=usage_json(u)))
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):

@@ -15,7 +15,7 @@ What was measured while building the GGUF path, so the numbers are reproducible 
 
 ## The quantization bridge
 
-`quantize_tensor` runs the pipeline from [`GGUF_DESIGN.md`](GGUF_DESIGN.md) §5.4: rotate, per-row scale, codebook, Viterbi, pack, interleave.
+`quantize_tensor` runs the pipeline described in [`GGUF.md`](GGUF.md): rotate, per-row scale, codebook, Viterbi, pack, interleave.
 
 ### Viterbi is optimal
 

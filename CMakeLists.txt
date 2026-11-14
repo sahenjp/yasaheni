@@ -98,6 +98,9 @@ else()
   # Keep the C ABI exported even though the rest of the shared object is hidden.
   set_target_properties(yskn PROPERTIES CXX_VISIBILITY_PRESET hidden CUDA_VISIBILITY_PRESET hidden)
   target_link_options(yskn PRIVATE -Wl,--no-undefined)
+  # build/bin/libyskn.so is one of the places the Python package looks, so --dll
+  # is not needed for a source checkout.
+  set_target_properties(yskn PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
 # Link the CUDA runtime statically so the .so needs only the driver, not the toolkit.

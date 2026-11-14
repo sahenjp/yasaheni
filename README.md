@@ -71,8 +71,10 @@ ctest --test-dir build --output-on-failure
 
 ## Documentation
 
-* [`docs/GGUF_DESIGN.md`](docs/GGUF_DESIGN.md): the `YSKN` container format, derived from the reader, and what a converter would need.
+* [`docs/FORMAT.md`](docs/FORMAT.md): upstream's byte-level specification of the `.yskn` format.
+* [`docs/GGUF.md`](docs/GGUF.md): what this fork's GGUF reader and encoder do, and what they do not.
 * [`docs/GGUF_NOTES.md`](docs/GGUF_NOTES.md): measured behaviour of the quantization bridge, including the trellis bound, the refinement gains, and the bugs the round-trip oracle caught.
+* [`docs/COLAB_A100.md`](docs/COLAB_A100.md): both engines measured on an A100, and where the 6.9% gap comes from.
 * [`bench/README.md`](bench/README.md): the benchmark harness and how the speed number is defined.
 
 ## Upstream
@@ -95,5 +97,5 @@ Upstream released v0.1.1 and v0.1.2 on 2026-11-13/14. This fork started from v0.
 
 Verified by compiling the same two translation units for `sm_80`: v0.1.2 produces `ptxas ... requires .target sm_90 or higher`, this fork produces zero errors.
 
-Upstream v0.1.2 also published the `YSKN` encoder at `tools/convert/yskn_convert.py`, which [docs/GGUF_DESIGN.md](docs/GGUF_DESIGN.md#7-what-the-published-encoder-corrected) checks this repository's format analysis against.
+Upstream v0.1.2 also published the encoder at [`tools/convert/`](tools/convert/) and the format specification at [`docs/FORMAT.md`](docs/FORMAT.md); [docs/GGUF.md](docs/GGUF.md) records where this fork's encoder differs from the reference one.
 

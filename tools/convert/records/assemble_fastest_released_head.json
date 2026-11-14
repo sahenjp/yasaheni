@@ -1,0 +1,13 @@
+{
+ "file": "f_released_head.yskn",
+ "bytes": 10311344128,
+ "sha256": "3ba17a76871a2b5e86fb1d01ab677e6b35ff5ccc27d4f03ad941501e3319d1ca",
+ "data_sha256": "2d5ddc4978bc666fe03d2df707edcc7ab9974ca2e15586d58b504f6b2ca32b58",
+ "body_bits": {
+  "6": 400,
+  "8": 0
+ },
+ "head": "copied from qwen38_27b_speed.yskn",
+ "embedding": "converted",
+ "seconds": 250.0787347000005
+}

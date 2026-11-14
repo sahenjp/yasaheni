@@ -59,7 +59,6 @@ def _model_dir(args) -> Path:
 
 
 def _gpu_lines() -> List[str]:
-    """What nvidia-smi says about the GPUs.  Never fatal: a missing tool or a driver that cannot be reached is reported as a line."""
     exe = shutil.which("nvidia-smi")
     if not exe:
         note = "nvidia-smi not found (it is installed with the NVIDIA driver)"
@@ -74,13 +73,13 @@ def _gpu_lines() -> List[str]:
     lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
     if lines:
         return lines
-    why = next((ln.strip() for ln in (r.stderr or "").splitlines() if ln.strip()), "")     # e.g. an NVML driver/library mismatch
+    why = next((ln.strip() for ln in (r.stderr or "").splitlines() if ln.strip()), "")
     return ["nvidia-smi reported no usable GPU" + (": " + why if why else "")]
 
 
 def _gpu_memory_warning(device: int = 0) -> Optional[str]:
-    """After loading: is the GPU's memory (almost) full?  When the model does not fit, the driver moves part of it to ordinary system
-    memory and generation becomes several times slower, without any error.  None when all is well or when it cannot be told."""
+    """After loading: is the GPU's memory (almost) full?  When the model does not fit, the driver moves part of it to ordinary system memory
+    and generation becomes several times slower, without any error.  None when all is well or when it cannot be told."""
     exe = shutil.which("nvidia-smi")
     if not exe:
         return None
@@ -107,6 +106,49 @@ def _add_engine_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--seed0", type=int, default=1, help="seed of the first request; every request without its own seed uses the next one")
 
 
+def _add_vision_args(sp: argparse.ArgumentParser) -> None:
+    g = sp.add_argument_group("image input (optional)")
+    g.add_argument("--mmproj", default=os.environ.get("YASAKANI_MMPROJ"),
+                   help="projector of Qwen3.8-27B (mmproj-Qwen3.8-27B-BF16.gguf); with --llama-dir and --vision-model it turns on image input")
+    g.add_argument("--llama-dir", default=os.environ.get("YASAKANI_LLAMA_DIR"),
+                   help="folder with the unpacked llama-b10488-bin-win-cpu-x64.zip (llama.cpp b10488, CPU build for Windows)")
+    g.add_argument("--vision-model", default=os.environ.get("YASAKANI_VISION_MODEL"),
+                   help="a Qwen3.8-27B GGUF (tested: Qwen3.8-27B-Q4_K_M.gguf of bartowski/Qwen3.8-27B-GGUF); only its settings and "
+                        "vocabulary are read, never its weights")
+    g.add_argument("--vision-cache", default=None, help="folder to keep image features in (default: none)")
+    # the defaults are those of yasaheni/vision.py (DEFAULT_IMAGE_TOKENS, IMAGE_TOKENS_RANGE, REQUEST_IMAGE_TOKENS_FACTOR); the
+    # numbers are written out here so that the help needs no import of numpy (tests/test_vision.py compares them)
+    g.add_argument("--vision-threads", type=int, default=None,
+                   help="CPU threads for encoding an image (default: one per physical CPU core)")
+    g.add_argument("--vision-max-image-tokens", type=int, default=1024, metavar="N",
+                   help="downsize every image to at most N image tokens, 64 to 4096 (default 1024; the encode time grows with the "
+                        "square of N: about 15 s for 1024 on a 16-core CPU)")
+    g.add_argument("--vision-max-request-image-tokens", type=int, default=None, metavar="N",
+                   help="at most N image tokens in one request, the images of earlier turns included (default: 8 x the per-image limit)")
+    g.add_argument("--vision-allow-local-files", metavar="DIR", default=None,
+                   help="also accept local file paths in image_url, for files inside DIR only (default: only data:image URIs)")
+
+
+def _vision(args):
+    """VisionProcessor when all three of --mmproj, --llama-dir and --vision-model are given, else None (text only, as before).
+    The options are checked here, before the model loads."""
+    given = [getattr(args, k, None) for k in ("mmproj", "llama_dir", "vision_model")]
+    if not any(given):
+        return None
+    if not all(given):
+        raise YasakaniError("image input needs all three of --mmproj, --llama-dir and --vision-model")
+    from .vision import DEFAULT_IMAGE_TOKENS, VisionProcessor, error_text
+    try:                                         # the paths become absolute here, before anything changes the working folder
+        vision = VisionProcessor(mmproj=args.mmproj, llama_dir=args.llama_dir, model=args.vision_model, cache=args.vision_cache,
+                                 threads=args.vision_threads, allow_local_files=args.vision_allow_local_files or False,
+                                 max_image_tokens=getattr(args, "vision_max_image_tokens", DEFAULT_IMAGE_TOKENS),
+                                 max_request_image_tokens=getattr(args, "vision_max_request_image_tokens", None))
+        vision.check()
+    except (ValueError, OSError, RuntimeError, ImportError) as ex:
+        raise YasakaniError("image input: %s" % error_text(ex)) from ex
+    return vision
+
+
 def _open_stack(args, *, warm: bool = True):
     """Model folder -> (pack, engine, formatter, runner).  The tokenizer is loaded first so a broken folder fails before the long load."""
     from .chat import ChatRunner
@@ -114,13 +156,14 @@ def _open_stack(args, *, warm: bool = True):
     from .textio import ChatFormatter
     pack = ModelPack.load(_model_dir(args))
     fmt = ChatFormatter(pack.root)
+    vision = _vision(args)                       # wrong image input options fail here, before the long load
     _say("loading the model (%s of weights) ..." % _human(pack.weights.stat().st_size))
     t0 = time.time()
     eng = Engine(pack, max_ctx=args.max_ctx, device=args.device, dll=args.dll)
     try:
         if eng.removed_env:
             _say("note: ignored %d YSKN_* setting(s) from the environment: %s" % (len(eng.removed_env), ", ".join(sorted(eng.removed_env))))
-        runner = ChatRunner(eng, fmt, seed0=args.seed0)
+        runner = ChatRunner(eng, fmt, seed0=args.seed0, vision=vision)
         if warm:
             runner.warmup()
     except BaseException:
@@ -224,7 +267,10 @@ def cmd_serve(args) -> int:
         pack, eng, fmt, runner = _open_stack(args, warm=not args.no_warmup)
         cfg.model_id = pack.model_id
         state.runner = runner
-        _say("ready: OpenAI-compatible API at %s/v1   (model id %r%s)" % (base, cfg.model_id, ", API key required" if cfg.api_key else ""))
+        _say("ready: OpenAI-compatible API at %s/v1   (model id %r%s%s)" % (base, cfg.model_id, ", API key required" if cfg.api_key else "",
+                                                                         ", image input on" if runner.vision is not None else ""))
+        if runner.vision is not None:
+            _say(runner.vision.summary())
         _say("stop with Ctrl+C")
         while True:
             time.sleep(0.5)
@@ -232,11 +278,14 @@ def cmd_serve(args) -> int:
         _say("stopping ...")
         return 0
     finally:
+        runner_ = state.runner
         state.runner = None
         httpd.shutdown()
         if eng is not None:
             eng.cancel()
             with state.gen_lock:
+                if runner_ is not None:
+                    runner_.close()
                 eng.close()
         httpd.server_close()
 
@@ -479,8 +528,7 @@ def cmd_selfcheck(args) -> int:
 
 # ---- entry point ------------------------------------------------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="yasaheni", description="Run Qwen3.8-27B locally on one RTX 5090 (Windows or Linux) with the "
-                                                               "YASAKANI engine.")
+    ap = argparse.ArgumentParser(prog="yasaheni", description="Run Qwen3.8-27B locally on one RTX 5090 (Windows or Linux) with the YASAKANI engine.")
     ap.add_argument("--version", action="version", version="yasaheni " + __version__)
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="{info,serve,chat,bench,selfcheck,verify}")
 
@@ -501,6 +549,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--default-max-tokens", type=int, default=32768, help="answer limit when a request does not give one")
     sp.add_argument("--max-tokens-cap", type=int, default=None, help="upper limit for any request")
     sp.add_argument("--no-warmup", action="store_true", help="skip the short warm-up run at start")
+    _add_vision_args(sp)
     sp.set_defaults(func=cmd_serve)
 
     sp = sub.add_parser("chat", help="talk to the model in the terminal")

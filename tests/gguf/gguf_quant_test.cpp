@@ -5,7 +5,7 @@
 //
 // Everything here is CPU only: no CUDA, no GGUF fixture, no GPU. The suite
 // checks the encoder against the *decoder* it targets --
-// docs/GGUF_DESIGN.md §5.5's oracle loop -- by re-implementing the two pieces
+// the round-trip oracle -- by re-implementing the two pieces
 // of reader arithmetic the encoder must be exactly compatible with:
 //
 //   build_lut8_tau   src/loader.cpp:19-25   (f16 LUT -> int8 LUT + gamma)
@@ -228,7 +228,7 @@ void invert_rotate(const float* A, int rows, int cols, const QuantConfig& cfg, f
 }
 
 // The normalised matrix B the encoder quantises: rotate, then scale each row by
-// 127/max|A[r]| (docs/GGUF_DESIGN.md §5.4 steps 3-4, §4.4).
+// 127/max|A[r]| (docs/GGUF.md).
 std::vector<float> normalised_b(const std::vector<float>& W, int rows, int cols,
                                 const QuantConfig& cfg) {
   std::vector<float> A = W;

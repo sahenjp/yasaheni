@@ -27,6 +27,31 @@ set(YSKN_GGUF_INCLUDE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src
 )
 
+# --- YSKN conformance ------------------------------------------------------
+# Checks this repository's reader against upstream's own format fixture:
+# tools/testdata/tiny.yskn was written by upstream's tools/yskn_fixture.py, and
+# tiny_expected.json by the same script. format.hpp and signs.hpp are the two
+# pieces under test, so this needs no GGUF sources.
+add_executable(yskn_conformance_test
+  yskn_conformance_test.cpp
+)
+
+target_include_directories(yskn_conformance_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${YSKN_GGUF_INCLUDE}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party
+)
+
+if(MSVC)
+  target_compile_options(yskn_conformance_test PRIVATE /W4 /utf-8)
+else()
+  target_compile_options(yskn_conformance_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(NAME yskn_conformance
+         COMMAND yskn_conformance_test
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/testdata/tiny.yskn)
+
 add_executable(gguf_test
   gguf_test.cpp
   ${YSKN_GGUF_SRC}
