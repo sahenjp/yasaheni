@@ -4,8 +4,13 @@
 
 
 #include "q35_g6.hpp"
+#include "q35_g6_tab.h"
 #include "pm_math.cuh"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <mutex>
 #include <stdexcept>
 #include <type_traits>
 namespace yskn {
@@ -16,6 +21,7 @@ struct Q35G6Seg {
 struct Q35G6Args {
   Q35G6Seg seg[3]; int n_seg, R; float eps; float* us_out;
   int xsm_sst, xsm_nb, pm; float xsm_n;
+  int tilegrid;
 };
 template <int K> __device__ __forceinline__ unsigned g6_field(const unsigned* w, int i) {
   constexpr int FB = 4 * K; const int bit = FB * i, wi = bit >> 5, sh = bit & 31;
@@ -285,21 +291,64 @@ template <int MB, bool BG, bool PN> static int g6_prepare_kernel(int sms) {
     throw std::runtime_error("q35_g6: no resident block");
   return sms * per;
 }
+struct G6Cc { int major, minor; };
+static G6Cc g6_query_cc(int dev) {
+  G6Cc r{-1, -1}; int a = 0, b = 0;
+  if (cudaDeviceGetAttribute(&a, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
+      cudaDeviceGetAttribute(&b, cudaDevAttrComputeCapabilityMinor, dev) == cudaSuccess) { r.major = a; r.minor = b; }
+  return r;
+}
+// Compute capability is cached per device ordinal: an engine opened later on
+// another GPU must not inherit this device's launch shape. Only successful
+// queries are cached, so a failed query is retried on the next call.
+static G6Cc g6_cc_for(int dev) {
+  static std::mutex mu;
+  static std::map<int, G6Cc> cache;
+  { std::lock_guard<std::mutex> lk(mu); auto it = cache.find(dev); if (it != cache.end()) return it->second; }
+  const G6Cc cc = g6_query_cc(dev);
+  if (cc.major >= 0) { std::lock_guard<std::mutex> lk(mu); cache.emplace(dev, cc); }
+  return cc;
+}
+// CUDA's current device is per thread, and cudaSetDevice can change it at any
+// time. Read it on every call: the launch targets whatever device is current on
+// the calling thread at that moment, so a cached binding would go stale.
+static int g6_current_dev() {
+  int d = 0; return cudaGetDevice(&d) == cudaSuccess ? d : 0;
+}
+
+static int g6_tilegrid_env() {
+  const char* e = std::getenv("YSKN_G6_TILEGRID");
+  const int v = yskn::q35_g6_tab::parse_tilegrid(e);
+  if (v == yskn::q35_g6_tab::kInvalid) {
+    static std::once_flag once;
+    std::call_once(once, [e] { std::fprintf(stderr, "[q35_g6] YSKN_G6_TILEGRID=\"%s\": expected 0 or 1; ignored\n", e); });
+    return yskn::q35_g6_tab::kUnset;
+  }
+  return v;
+}
+static bool g6_tilegrid_for(int dev) {
+  const G6Cc cc = g6_cc_for(dev);
+  return yskn::q35_g6_tab::pick_tilegrid(g6_tilegrid_env(), cc.major, cc.minor);
+}
 void q35_g6_prepare(Q35G6Workspace& W, int sms) {
   W.resident[0] = g6_prepare_kernel<4, false, false>(sms);
   W.resident[1] = g6_prepare_kernel<4, false, true>(sms);
   W.resident[2] = g6_prepare_kernel<2, true, false>(sms);
   W.resident[3] = g6_prepare_kernel<2, true, true>(sms);
   int cap = *std::max_element(W.resident, W.resident + 4);
+  // The split-K handoff buffer is always allocated. The launch grid is chosen on
+  // every launch, so a split-K launch must never find its workspace missing.
   W.partial_bytes = (size_t)(cap + 1) * G6_NT * G6C<4>::NACC * sizeof(long long);
   W.flags_bytes = (size_t)(cap + 1) * 2 * sizeof(int);
 }
 template <int MB, bool BG, bool PN> static void g6_launch(Q35G6Args P, Q35G6Workspace& W, cudaStream_t st) {
-  const int MT = (P.R + G6C<MB>::BM - 1) / G6C<MB>::BM;
+  using C = G6C<MB>;
   const int NT = P.seg[P.n_seg - 1].cta_begin + P.seg[P.n_seg - 1].ctas;
   const int G = P.seg[0].t.Kc / 512;
-  const int ctas = std::min(MT * NT, W.resident[(BG ? 2 : 0) + (PN ? 1 : 0)]);
-  mt_gemm6_kernel<MB, BG, PN><<<ctas, G6_NT, G6C<MB>::SMEM, st>>>(P, MT, G, W.partial, W.flags);
+  const int MT = (P.R + C::BM - 1) / C::BM;
+  const int res = W.resident[(BG ? 2 : 0) + (PN ? 1 : 0)];
+  const int ctas = P.tilegrid ? MT * NT : std::min(MT * NT, res);
+  mt_gemm6_kernel<MB, BG, PN><<<ctas, G6_NT, C::SMEM, st>>>(P, MT, G, W.partial, W.flags);
 }
 void q35_g6_decode(const TensorDev& t, uint4* dst, cudaStream_t st) {
   const int blocks = ((t.N / 16) * (t.Kc / 256) + 7) / 8;
@@ -314,6 +363,12 @@ bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t 
   if (Kc < 512 || Kc % 512) return false;
   Q35G6Args Q{}; Q.n_seg = P.n_seg; Q.R = P.M; Q.eps = P.xsm_eps; Q.us_out = P.us_out;
   Q.xsm_sst = P.xsm_sst; Q.xsm_nb = P.xsm_nb; Q.xsm_n = P.xsm_n; Q.pm = pm;
+  Q.tilegrid = g6_tilegrid_for(g6_current_dev()) ? 1 : 0;
+  static bool sw_logged = false;
+  if (!sw_logged) {
+    sw_logged = true;
+    std::fprintf(stderr, "[q35_g6] tilegrid=%d split-K partial %zu bytes\n", Q.tilegrid, W.partial_bytes);
+  }
   for (int s = 0; s < P.n_seg; ++s) {
     const auto& t = P.seg[s].t;
     if (!t.lno || !t.lut8 || t.tile_k || t.group_worker || t.Kc != Kc || t.N <= 0 || t.N % 16 || (t.k_default != 4 && t.k_default != 6 && t.k_default != 8))

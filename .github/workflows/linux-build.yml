@@ -57,8 +57,8 @@ jobs:
             echo "::error::yskn_open is not exported by $so"; head -n 40 symbols.txt; exit 1; }
           echo "yskn_open is exported"
 
-      # The GGUF and LNORD table suites are host-only (no GPU needed), so they
-      # can gate every push, not just local runs.
+      # The GGUF, LNORD and q35_g6 table suites are host-only (no GPU needed),
+      # so they can gate every push, not just local runs.
       - name: Run the host test suites
         run: |
           cmake -S tests/gguf -B build-tests -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -67,3 +67,6 @@ jobs:
           cmake -S tests/lnord_tab -B build-lnord-tab -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build-lnord-tab --parallel "$(nproc)"
           ctest --test-dir build-lnord-tab --output-on-failure
+          cmake -S tests/q35_g6_tab -B build-q35-g6-tab -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-q35-g6-tab --parallel "$(nproc)"
+          ctest --test-dir build-q35-g6-tab --output-on-failure
