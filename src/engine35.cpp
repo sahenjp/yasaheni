@@ -1249,6 +1249,7 @@ int Engine35::prefill_rows(const int32_t* ids, int n, int32_t* out_argmax, int32
   if (n < 1 || pos_ + n > max_ctx_) throw std::runtime_error("prefill_rows: context overflow");
   int next = 0;
   for (int done = 0; done < n;) {
+    prefill_cancel_check();                                              // between chunks only: never inside a kernel
     const int M = std::min(PM_, n - done);
     upload_rows(ids + done, M, nullptr);
     run_pass(M, true, HEAD_ALL, true, false, true);
