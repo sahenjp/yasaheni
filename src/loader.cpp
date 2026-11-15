@@ -10,8 +10,21 @@
 #include "devmem.hpp"   
 namespace yskn {
 static float h2f_host(uint16_t u) { __half h = *reinterpret_cast<__half*>(&u); return __half2float(h); }
-template <class T2> static T2* dev_copy(const void* src, size_t bytes) { T2* d = nullptr; cudaMalloc(&d, bytes); cudaMemcpy(d, src, bytes, cudaMemcpyHostToDevice); return d; }
-template <class T2> static T2* dev_zero(size_t bytes) { T2* d = nullptr; cudaMalloc(&d, bytes); cudaMemset(d, 0, bytes); return d; }
+// Every upload below moves whole tensors to the GPU before the engine can
+// check anything, so a failed allocation or copy has to stop the load here.
+// Returning a null or half-filled buffer would surface later as garbage
+// output or a crash in an unrelated kernel, with the cause long gone.
+static void upload_check(cudaError_t e, const char* what) {
+  if (e != cudaSuccess)
+    throw std::runtime_error(std::string("model upload: ") + what + " failed (" + cudaGetErrorString(e) + ")");
+}
+static void repack_check(int rc) {
+  if (rc != 0)
+    throw std::runtime_error(std::string("model upload: repack failed (") +
+                             (rc == -1 ? "bad tile shape" : cudaGetErrorString((cudaError_t)rc)) + ")");
+}
+template <class T2> static T2* dev_copy(const void* src, size_t bytes) { T2* d = nullptr; upload_check(cudaMalloc(&d, bytes), "cudaMalloc"); upload_check(cudaMemcpy(d, src, bytes, cudaMemcpyHostToDevice), "cudaMemcpy"); return d; }
+template <class T2> static T2* dev_zero(size_t bytes) { T2* d = nullptr; upload_check(cudaMalloc(&d, bytes), "cudaMalloc"); upload_check(cudaMemset(d, 0, bytes), "cudaMemset"); return d; }
 
 // Every 'c.' below goes through T()/V()/at() (src/model.hpp), which resolve to
 // whichever container Model::open_backing() made live: the mmap'd YSKN
@@ -43,16 +56,16 @@ DevTensor Model::upload_linear(const TensorDesc& d, int Mmax, int want_workers, 
   const int ntiles = rows / 64;
   if (!d.has_rar) {
     const int wps = 4 * d.bits; const size_t nwords = (size_t)rows * seqs * wps;
-    uint32_t* dw = dev_copy<uint32_t>(words, nwords * 4); cudaMalloc(&t.frag, nwords * 4);
-    yskn_repack_warp_to_frag(dw, (uint32_t*)t.frag, rows, seqs, wps, nullptr); cudaDeviceSynchronize(); cudaFree(dw);
+    uint32_t* dw = dev_copy<uint32_t>(words, nwords * 4); upload_check(cudaMalloc(&t.frag, nwords * 4), "cudaMalloc");
+    repack_check(yskn_repack_warp_to_frag(dw, (uint32_t*)t.frag, rows, seqs, wps, nullptr)); upload_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize"); cudaFree(dw);
     t.tiles_by_k.assign(9, {}); for (int i = 0; i < ntiles; ++i) t.tiles_by_k[d.bits].push_back(i); t.kmax = d.bits;
   } else {
     const uint8_t* kt = at<uint8_t>(*this, d.rar.k_off, src); const uint64_t* off = at<uint64_t>(*this, d.rar.off_off, src);
     size_t total_u4 = 0; std::vector<uint64_t> toff(ntiles); std::vector<uint8_t> tk(ntiles);
     for (int i = 0; i < ntiles; ++i) { tk[i] = kt[i]; toff[i] = total_u4; total_u4 += (size_t)64 * seqs * (4 * tk[i]) / 4; }
-    cudaMalloc(&t.frag, total_u4 * 16);
+    upload_check(cudaMalloc(&t.frag, total_u4 * 16), "cudaMalloc");
     for (int i = 0; i < ntiles; ++i) { const int wps = 4 * tk[i]; const size_t nw = (size_t)64 * seqs * wps;
-      uint32_t* dw = dev_copy<uint32_t>(words + off[i], nw * 4); yskn_repack_warp_to_frag(dw, (uint32_t*)(t.frag + toff[i]), 64, seqs, wps, nullptr); cudaDeviceSynchronize(); cudaFree(dw); }
+      uint32_t* dw = dev_copy<uint32_t>(words + off[i], nw * 4); repack_check(yskn_repack_warp_to_frag(dw, (uint32_t*)(t.frag + toff[i]), 64, seqs, wps, nullptr)); upload_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize"); cudaFree(dw); }
     t.tile_off = dev_copy<uint64_t>(toff.data(), ntiles * 8); t.tile_k = dev_copy<uint8_t>(tk.data(), ntiles);
     t.tiles_by_k.assign(9, {}); t.kmax = 0; for (int i = 0; i < ntiles; ++i) { t.tiles_by_k[tk[i]].push_back(i); t.kmax = std::max(t.kmax, (int)tk[i]); }
   }
