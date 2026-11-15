@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import os
 import socket
 import sys
@@ -35,6 +36,7 @@ from .chat import (REASONING_EFFORT_ALIASES, ChatParams, ChatRunner, RequestErro
 
 MAX_BODY = 32 * 1024 * 1024
 LOOPBACK = ("127.0.0.1", "localhost", "[::1]")
+_GEN_LOCK_MAX_S = 9.0e9                              # threading.Lock.acquire rejects a timeout at about 9.22e9 seconds
 
 
 class ServerConfig:
@@ -53,7 +55,9 @@ class ServerConfig:
                 gen_lock_s = float(os.environ.get("YSKN_GEN_LOCK_S") or 120.0)
             except ValueError:
                 gen_lock_s = 120.0
-        self.gen_lock_s = max(0.0, float(gen_lock_s))
+        gen_lock_s = float(gen_lock_s)
+        self.gen_lock_s = (120.0 if not math.isfinite(gen_lock_s) or gen_lock_s > _GEN_LOCK_MAX_S
+                           else max(0.0, gen_lock_s))
 
 
 class ApiState:

@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import http.client
 import json
+import os
 import socket
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests import support
 from yasaheni.chat import ChatRunner
@@ -16,6 +18,19 @@ from yasaheni.textio import ChatFormatter
 
 EOS = EOS_IDS[0]
 HAVE_TOK = support.tokenizer_dir() is not None
+
+
+class ServerConfigTests(unittest.TestCase):
+    def test_non_finite_gen_lock_falls_back_to_120(self):
+        for value in ("inf", "nan", "1e100"):
+            with mock.patch.dict(os.environ, {"YSKN_GEN_LOCK_S": value}):
+                self.assertEqual(ServerConfig().gen_lock_s, 120.0)
+
+    def test_finite_gen_lock_is_clamped_below_the_acquire_limit(self):
+        with mock.patch.dict(os.environ, {"YSKN_GEN_LOCK_S": "1e15"}):
+            cfg = ServerConfig()
+        self.assertLess(cfg.gen_lock_s, 9.22e9)
+        self.assertNotEqual(cfg.gen_lock_s, 1e15)
 
 
 @unittest.skipUnless(HAVE_TOK, "set YASAKANI_TEST_MODEL_DIR to a folder with the Qwen3.8 tokenizer files")
