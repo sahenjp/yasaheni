@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -36,6 +37,34 @@ struct Q35Layer {
 
 
 
+// One segment of a parked handle. layer is an ordinal into L_ (-1 for the
+// scalar entries); kind selects the source buffer.
+enum ParkKind { PARK_KV_K = 0, PARK_KV_V, PARK_KV_KS, PARK_KV_VS, PARK_LIN_S, PARK_LIN_HIST, PARK_TOK, PARK_IDS };
+struct ParkSeg { int layer; int kind; size_t off; size_t bytes; };
+constexpr uint64_t kParkMagic = 0x59534b4e5041524bull;   // "YSKNPARK"
+constexpr size_t kBdrRingBytes = (size_t)8 * 2048 * 128 * 2;   // one bdraft K or V ring
+// Released park blocks are kept here so the next park of a fitting context does not pay cudaMallocHost again.  The pool holds at
+// most one spare (the largest block seen); Engine35 and every live handle share it, so the block is freed when the last of them
+// goes away.  YSKN_PARK_REUSE=0 frees every released block instead.
+struct ParkPool {
+  std::mutex mu;
+  unsigned char* spare = nullptr;
+  size_t spare_bytes = 0;
+  ~ParkPool();
+};
+struct ParkState {
+  unsigned char* block = nullptr;      // one pinned allocation, at least h.bytes long
+  std::vector<ParkSeg> segs;
+  int32_t* ids = nullptr;              // inside block, pos entries
+  int pos = 0;
+  int32_t tok = 0;                     // d_toks_[0] at park time
+  size_t bytes = 0;                    // layout bytes (what yskn_park_info reports)
+  size_t alloc_bytes = 0;              // size of block (may be larger than bytes when reused)
+  bool reused = false;                 // block came from the pool
+  std::shared_ptr<ParkPool> pool;      // owner of block's lifetime and of the spare list
+  uint64_t fingerprint = 0;
+  uint64_t magic = 0;
+};
 struct Q35Mtp {
   bool on = false; Container c; DevTensor fc, head; Q35Layer L; int nsub = 0;
   uint16_t *en = nullptr, *hn = nullptr, *norm = nullptr; int* ids = nullptr;   
@@ -116,6 +145,11 @@ public:
   
   
   int state_hash(uint64_t* out, int max_out);
+  size_t park_bytes(int pos) const;                   
+  uint64_t park_fingerprint() const;                  
+  void park_layout(int pos, ParkState& h) const;      
+  ParkState* park_alloc(int pos) const;               
+  static void park_release(ParkState* h);             
   
   
   
@@ -125,6 +159,11 @@ public:
   
   void snap_save(const int32_t* ids, int n);        
   void snap_load();                                  
+  // park copies the committed durable state (KV rows, linear S/hist, d_toks_[0], ids) into pinned host memory.  It refuses MTP
+  // drafter state, visual state and a mid-verify state.  resume restores that state and clears (does not restore) the bdraft KV
+  // rings and the HCAP capture buffer, so no rows from the previous context survive at the same absolute positions.
+  ParkState* park(const int32_t* ids, int n);        
+  void resume(const ParkState* h);                  
   int  snap_pos() const { return sh_pos_; }
   const std::vector<int32_t>& snap_ids() const { return sh_ids_; }
   void snap_note(const int32_t* ids, int n) { sh_cur_.assign(ids, ids + n); sh_note_ = sh_epoch_; }   
@@ -367,11 +406,21 @@ private:
   bool specx_scope_ = false;  
   bool pre_committed_ = false;   
   
+  void linear_out(float* dst_S, uint16_t* dst_hist);            
+  void linear_in(const float* src_S, const uint16_t* src_hist); 
   float* sh_S_ = nullptr; uint16_t* sh_hist_ = nullptr; uint16_t* sh_ring_ = nullptr; uint16_t* sh_pend_ = nullptr;
   int sh_pos_ = -1; std::vector<int32_t> sh_ids_, sh_cur_; unsigned long long sh_epoch_ = 1, sh_note_ = 0;
-  
-  
-  
+  uint64_t park_fp_ = 0;               // model path and layout, fixed at open
+  std::shared_ptr<ParkPool> park_pool_ = std::make_shared<ParkPool>();
+  int park_stage_mb_ = 64;             // device staging reserved for park and resume, split into two halves
+  unsigned char* park_stg_ = nullptr;  // allocated on the first park or resume; null means use the old 3D copies
+  size_t park_stg_half_ = 0;
+  bool park_stg_tried_ = false;
+  cudaStream_t park_gs_ = nullptr;     // gather/scatter stream, so the next chunk overlaps the previous copy
+  cudaEvent_t park_ev_[2] = {};
+  bool park_stage_ready();             // lazily allocate the staging buffer; false selects the 3D copies (YSKN_PARK_STAGE_MB=0)
+  bool park_kv_spans(const ParkState& h, std::vector<std::pair<unsigned char*, size_t>>& spans, size_t& kv_bytes) const;
+
   int vis_n_ = 0, vis_delta_ = 0; std::vector<int32_t> vis_pos_; std::vector<int> vis_map_; std::vector<unsigned long long> vis_hash_;
   bool visual_prefix_agrees(const std::vector<int>& map, const int32_t* positions, int n_prompt, int delta,
                             const std::vector<unsigned long long>& hash) const;

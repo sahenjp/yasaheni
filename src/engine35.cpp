@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
 #include "engine35.hpp"
+#include "park_gather.hpp"
 #include <algorithm>
+#include <chrono>
 #include <map>
 #include <mutex>
 #include <filesystem>
@@ -208,6 +210,7 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   { const char* e = std::getenv("YSKN_TB_CAP"); tbcap_ = (e && e[0]) ? std::atoi(e) : 0; tbcap_kb_ = g_tb_kb; }
   if (tbcap_) { tb_rec_ = g_tb_rec; if (!tb_rec_) throw std::runtime_error("YSKN_TB_CAP=1: the KVQ profile has no decode records"); if (!tbf_host().scr) throw std::runtime_error("YSKN_TB_CAP=1 needs the fast encoder (YSKN_TB_FAST=1)"); }
 #endif
+  { const char* e = std::getenv("YSKN_PARK_STAGE_MB"); if (e && e[0]) { const int m = std::atoi(e); if (m >= 0) park_stage_mb_ = m; } }
   if (kv_fp16_ && kv8_) throw std::runtime_error("FP16 KV requires YSKN_Q35_KV8=0");
   { const char* e = std::getenv("YSKN_Q35_XSUM"); if (e && e[0]) xsm_ = std::atoi(e) != 0;
     const char* p = std::getenv("YSKN_Q35_XSM_PART"); if (p && p[0]) xsm_part_ = std::atoi(p) != 0; }
@@ -365,15 +368,31 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   apply_kz();
   { const char* f = std::getenv("YSKN_Q35_FA"); if (f && f[0]) fa_ = std::atoi(f); const char* s = std::getenv("YSKN_Q35_FA_SPLITS"); if (s && std::atoi(s) > 0) fa_splits_ = std::min(32, std::atoi(s)); }
   if (xsm_) { us_ = dz35<float>((size_t)M * 4); S_ = dz35<float>((size_t)M * Q35_SST * 4); ybuf_ = dz35<float>(part_floats_ * 4); }
+  { // Park fingerprint: a handle is only valid for the same file and layout.
+    // The drafter bits are mixed in at call time, so loading one later separates it.
+    std::string np; try { np = std::filesystem::weakly_canonical(path).string(); } catch (...) { np = path; }
+    uint64_t h = 0xcbf29ce484222325ull;
+    auto mix = [&](const void* p, size_t n) { const unsigned char* b = static_cast<const unsigned char*>(p);
+      for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 0x100000001b3ull; } };
+    auto mixu = [&](uint64_t v) { mix(&v, sizeof v); };
+    mix(np.data(), np.size()); mixu(0xffu);
+    mixu((uint64_t)V_); mixu((uint64_t)H_); mixu((uint64_t)F_); mixu((uint64_t)nlayers_);
+    for (const Q35Layer& Y : L_) mixu(Y.full ? 1u : 0u);
+    mixu((uint64_t)max_ctx_); mixu((uint64_t)kv8_); mixu((uint64_t)kv_fp16_);
+    mixu((uint64_t)tbcap_); mixu((uint64_t)tbcap_kb_);
+    park_fp_ = h; }
   cudaMallocHost(&h_pin_, (size_t)PIN_N * 4); cudaMallocHost(&h_pinf_, (size_t)PINF_N * 4); cudaMallocHost(&h_dec_, (size_t)max_ctx_ * 4);
   d_wk_ = dz35<uint8_t>(64); cudaMallocHost(&h_wk_, 4 * 64);           
   cudaStreamSynchronize(st_);
   const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("Engine35 load: ") + cudaGetErrorString(e));
   size_t fr = 0, tot = 0; cudaMemGetInfo(&fr, &tot);
-  std::fprintf(stderr, "[qwen3_5] %d layers loaded, LNORD codes %.2f GB, free %.1f / %.1f GB\n", nlayers_, lno_bytes_ / 1e9, fr / 1e9, tot / 1e9);
+  std::fprintf(stderr, "[qwen3_5] %d layers loaded, LNORD codes %.2f GB, free %.1f / %.1f GB, park staging %d MiB on first park\n", nlayers_, lno_bytes_ / 1e9, fr / 1e9, tot / 1e9, park_stage_mb_);
 }
 Engine35::~Engine35() {
   cudaStreamSynchronize(st2_); cudaStreamSynchronize(st_);
+  if (park_gs_) { cudaStreamSynchronize(park_gs_); cudaStreamDestroy(park_gs_); park_gs_ = nullptr; }
+  for (int i = 0; i < 2; ++i) { if (park_ev_[i]) cudaEventDestroy(park_ev_[i]); park_ev_[i] = nullptr; }
+  if (park_stg_) { cudaFree(park_stg_); park_stg_ = nullptr; }
   if (kz_) { q35_set_pm(0, st_); q35_flow_set_pm(0, st_); pfa_set_pm(0, st_); cudaStreamSynchronize(st_); }   
                                                                        
   if (gexec_) cudaGraphExecDestroy(gexec_);
@@ -1548,22 +1567,34 @@ static uint64_t fnv_words(uint64_t h, const std::vector<uint8_t>& b) {
 
 
 
+void Engine35::linear_out(float* dst_S, uint16_t* dst_hist) {
+  constexpr size_t SB = (size_t)Q35_GV * Q35_GD * Q35_GD, HB = (size_t)3 * Q35_CONV;
+  int g = 0;
+  for (const Q35Layer& Y : L_) if (!Y.full) {
+    cudaMemcpyAsync(dst_S + g * SB, Y.S, SB * 4, cudaMemcpyDeviceToHost, st_);
+    cudaMemcpyAsync(dst_hist + g * HB, Y.hist, HB * 2, cudaMemcpyDeviceToHost, st_); ++g; }
+}
+void Engine35::linear_in(const float* src_S, const uint16_t* src_hist) {
+  constexpr size_t SB = (size_t)Q35_GV * Q35_GD * Q35_GD, HB = (size_t)3 * Q35_CONV;
+  int g = 0;
+  for (Q35Layer& Y : L_) if (!Y.full) {
+    cudaMemcpyAsync(Y.S, src_S + g * SB, SB * 4, cudaMemcpyHostToDevice, st_);
+    cudaMemcpyAsync(Y.hist, src_hist + g * HB, HB * 2, cudaMemcpyHostToDevice, st_); ++g; }
+}
 void Engine35::snap_save(const int32_t* ids, int n) {
   if (n != pos_ || n < 1) throw std::runtime_error("snap_save: the ids must cover positions 0..pos-1");
   replay_fence();
-  constexpr size_t SB = (size_t)Q35_GV * Q35_GD * Q35_GD, HB = (size_t)3 * Q35_CONV, RB = (size_t)8 * 2048 * 128;
+  constexpr size_t SB = (size_t)Q35_GV * Q35_GD * Q35_GD, HB = (size_t)3 * Q35_CONV, RB = kBdrRingBytes / 2;
   int ng = 0; for (const Q35Layer& Y : L_) if (!Y.full) ++ng;
   if (!sh_S_) { DevMemScope dm_scope(this);                          
     auto pin = [](auto** p, size_t bytes) { if (cudaMallocHost(p, bytes) != cudaSuccess) throw std::runtime_error("snap_save: out of pinned memory"); };
     pin(&sh_S_, ng * SB * 4); pin(&sh_hist_, ng * HB * 2);
-    if (bdr_.on) pin(&sh_ring_, 10 * RB * 2);
+    if (bdr_.on) pin(&sh_ring_, 10 * kBdrRingBytes);
     if (mtp_.on) pin(&sh_pend_, (size_t)H_ * 2); }
   if ((bdr_.on && !sh_ring_) || (mtp_.on && !sh_pend_)) throw std::runtime_error("snap_save: drafter loaded after the first snapshot");
-  int g = 0;
-  for (const Q35Layer& Y : L_) if (!Y.full) {
-    cudaMemcpyAsync(sh_S_ + g * SB, Y.S, SB * 4, cudaMemcpyDeviceToHost, st_); cudaMemcpyAsync(sh_hist_ + g * HB, Y.hist, HB * 2, cudaMemcpyDeviceToHost, st_); ++g; }
-  if (bdr_.on) for (int i = 0; i < 5; ++i) { cudaMemcpyAsync(sh_ring_ + (2 * i) * RB, bdr_.rk[i], RB * 2, cudaMemcpyDeviceToHost, st_);
-                                            cudaMemcpyAsync(sh_ring_ + (2 * i + 1) * RB, bdr_.rv[i], RB * 2, cudaMemcpyDeviceToHost, st_); }
+  linear_out(sh_S_, sh_hist_);
+  if (bdr_.on) for (int i = 0; i < 5; ++i) { cudaMemcpyAsync(sh_ring_ + (2 * i) * RB, bdr_.rk[i], kBdrRingBytes, cudaMemcpyDeviceToHost, st_);
+                                            cudaMemcpyAsync(sh_ring_ + (2 * i + 1) * RB, bdr_.rv[i], kBdrRingBytes, cudaMemcpyDeviceToHost, st_); }
   if (mtp_.on) cudaMemcpyAsync(sh_pend_, mtp_.pend, (size_t)H_ * 2, cudaMemcpyDeviceToHost, st_);
   cudaStreamSynchronize(st_);
   const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("snap_save: ") + cudaGetErrorString(e));
@@ -1572,12 +1603,10 @@ void Engine35::snap_save(const int32_t* ids, int n) {
 void Engine35::snap_load() {
   if (sh_pos_ < 1 || !sh_S_) throw std::runtime_error("snap_load: no snapshot");
   replay_fence(); ++sh_epoch_;
-  constexpr size_t SB = (size_t)Q35_GV * Q35_GD * Q35_GD, HB = (size_t)3 * Q35_CONV, RB = (size_t)8 * 2048 * 128;
-  int g = 0;
-  for (Q35Layer& Y : L_) if (!Y.full) {
-    cudaMemcpyAsync(Y.S, sh_S_ + g * SB, SB * 4, cudaMemcpyHostToDevice, st_); cudaMemcpyAsync(Y.hist, sh_hist_ + g * HB, HB * 2, cudaMemcpyHostToDevice, st_); ++g; }
-  if (bdr_.on && sh_ring_) for (int i = 0; i < 5; ++i) { cudaMemcpyAsync(bdr_.rk[i], sh_ring_ + (2 * i) * RB, RB * 2, cudaMemcpyHostToDevice, st_);
-                                                       cudaMemcpyAsync(bdr_.rv[i], sh_ring_ + (2 * i + 1) * RB, RB * 2, cudaMemcpyHostToDevice, st_); }
+  constexpr size_t RB = kBdrRingBytes / 2;
+  linear_in(sh_S_, sh_hist_);
+  if (bdr_.on && sh_ring_) for (int i = 0; i < 5; ++i) { cudaMemcpyAsync(bdr_.rk[i], sh_ring_ + (2 * i) * RB, kBdrRingBytes, cudaMemcpyHostToDevice, st_);
+                                                       cudaMemcpyAsync(bdr_.rv[i], sh_ring_ + (2 * i + 1) * RB, kBdrRingBytes, cudaMemcpyHostToDevice, st_); }
   if (mtp_.on && sh_pend_) cudaMemcpyAsync(mtp_.pend, sh_pend_, (size_t)H_ * 2, cudaMemcpyHostToDevice, st_);
   pos_ = sh_pos_; last_M_ = 0; pre_committed_ = false; launch_set_int(d_pos_, pos_, st_);
   cudaStreamSynchronize(st_);
@@ -1608,6 +1637,366 @@ int Engine35::state_hash(uint64_t* out, int max_out) {
   if (e != cudaSuccess) throw std::runtime_error(std::string("state_hash: ") + cudaGetErrorString(e));
   return n;
 }
+void Engine35::park_layout(int pos, ParkState& h) const {
+  if (pos < 0 || pos > max_ctx_) throw std::runtime_error("park: position out of range");
+  const size_t SB = (size_t)Q35_GV * Q35_GD * Q35_GD, HB = (size_t)3 * Q35_CONV;
+  h.segs.clear(); h.pos = pos; h.tok = 0; h.ids = nullptr;
+  size_t off = 0;
+  auto add = [&](int l, int kind, size_t bytes) { h.segs.push_back(ParkSeg{l, kind, off, bytes}); off += bytes; };
+  for (int l = 0; l < nlayers_; ++l) {
+    const Q35Layer& Y = L_[l];
+    if (!Y.full) continue;
+    if (kv8_) {
+      // Per head the rows are max_ctx_ apart; the handle packs them head by head.
+      add(l, PARK_KV_K, (size_t)pos * Q35_KVH * (Y.kp ? (size_t)32 * tbcap_kb_ : (size_t)Q35_HD));
+      add(l, PARK_KV_V, (size_t)pos * Q35_KVH * (Y.vp ? (size_t)32 * tbcap_kb_ : (size_t)Q35_HD));
+      add(l, PARK_KV_KS, (size_t)pos * Q35_KVH * 4);
+      add(l, PARK_KV_VS, (size_t)pos * Q35_KVH * 4);
+    } else {
+      add(l, PARK_KV_K, (size_t)pos * Q35_KVH * Q35_HD * 2);
+      add(l, PARK_KV_V, (size_t)pos * Q35_KVH * Q35_HD * 2);
+    }
+  }
+  // S and hist live in two contiguous arrays so the snapshot helpers can be reused.
+  for (int l = 0; l < nlayers_; ++l) if (!L_[l].full) add(l, PARK_LIN_S, SB * 4);
+  for (int l = 0; l < nlayers_; ++l) if (!L_[l].full) add(l, PARK_LIN_HIST, HB * 2);
+  add(-1, PARK_TOK, 4);
+  add(-1, PARK_IDS, (size_t)pos * 4);
+  h.bytes = off;
+}
+size_t Engine35::park_bytes(int pos) const { ParkState h; park_layout(pos, h); return h.bytes; }
+uint64_t Engine35::park_fingerprint() const {
+  uint64_t h = park_fp_;
+  auto mix = [&](uint64_t v) { h ^= v; h *= 0x100000001b3ull; };
+  mix(bdr_.on ? 1u : 0u); mix(mtp_.on ? 2u : 0u);
+  return h;
+}
+ParkPool::~ParkPool() {
+  if (spare) {
+    const cudaError_t e = cudaFreeHost(spare);
+    if (e != cudaSuccess) std::fprintf(stderr, "[park] cudaFreeHost: %s\n", cudaGetErrorString(e));
+  }
+}
+ParkState* Engine35::park_alloc(int pos) const {
+  ParkState* h = new ParkState();
+  h->magic = kParkMagic;                       // park_release must be able to undo a half-built handle
+  h->pool = park_pool_;
+  try {
+    park_layout(pos, *h);
+    const bool reuse = [] { const char* r = std::getenv("YSKN_PARK_REUSE"); return !(r && r[0] == '0'); }();
+    if (reuse) {
+      std::lock_guard<std::mutex> guard(h->pool->mu);
+      if (h->pool->spare && h->pool->spare_bytes >= h->bytes) {
+        h->block = h->pool->spare; h->alloc_bytes = h->pool->spare_bytes; h->reused = true;
+        h->pool->spare = nullptr; h->pool->spare_bytes = 0;
+      }
+    }
+    if (!h->block) {
+      if (cudaMallocHost((void**)&h->block, h->bytes) != cudaSuccess) { h->block = nullptr; throw std::runtime_error("park: out of pinned host memory"); }
+      h->alloc_bytes = h->bytes;
+    }
+    for (const ParkSeg& s : h->segs) if (s.kind == PARK_IDS) h->ids = reinterpret_cast<int32_t*>(h->block + s.off);
+    h->fingerprint = park_fingerprint();
+  } catch (...) { park_release(h); throw; }
+  return h;
+}
+void Engine35::park_release(ParkState* h) {
+  if (!h || h->magic != kParkMagic) return;    // a released handle has no live block to free
+  h->magic = 0;
+  if (h->block) {
+    unsigned char* block = h->block;
+    const size_t bytes = h->alloc_bytes;
+    h->block = nullptr;
+    bool kept = false;
+    if (h->pool) {
+      const bool reuse = [] { const char* r = std::getenv("YSKN_PARK_REUSE"); return !(r && r[0] == '0'); }();
+      if (reuse) {
+        unsigned char* drop = nullptr;
+        { std::lock_guard<std::mutex> guard(h->pool->mu);
+          if (!h->pool->spare) { h->pool->spare = block; h->pool->spare_bytes = bytes; kept = true; }
+          else if (h->pool->spare_bytes < bytes) { drop = h->pool->spare; h->pool->spare = block; h->pool->spare_bytes = bytes; kept = true; } }
+        if (drop) {
+          const cudaError_t e = cudaFreeHost(drop);
+          if (e != cudaSuccess) std::fprintf(stderr, "[park] cudaFreeHost: %s\n", cudaGetErrorString(e));
+        }
+      }
+    }
+    if (!kept) {
+      const cudaError_t e = cudaFreeHost(block);
+      if (e != cudaSuccess) std::fprintf(stderr, "[park] cudaFreeHost: %s\n", cudaGetErrorString(e));
+    }
+  }
+  delete h;
+}
+
+// The device staging is allocated on the first park or resume and shared by both directions.  It is split into two halves so the
+// next chunk's device work overlaps the previous chunk's contiguous copy; one event per half orders the reuse of that half.
+// A failed allocation keeps the old 3D path.  YSKN_PARK_STAGE_MB=0 forces that path.
+bool Engine35::park_stage_ready() {
+  if (!park_stg_tried_) {
+    park_stg_tried_ = true;
+    size_t half = ((size_t)park_stage_mb_ << 20) / 2 & ~(size_t)4095;
+    if (!half) {
+      std::fprintf(stderr, "[park] device staging disabled (YSKN_PARK_STAGE_MB=0); using the 3D copies\n");
+      return false;
+    }
+    cudaError_t ce = cudaMalloc((void**)&park_stg_, half * 2);
+    if (ce == cudaSuccess) ce = cudaStreamCreateWithFlags(&park_gs_, cudaStreamNonBlocking);
+    for (int i = 0; i < 2 && ce == cudaSuccess; ++i) ce = cudaEventCreateWithFlags(&park_ev_[i], cudaEventDisableTiming);
+    if (ce == cudaSuccess) park_stg_half_ = half;
+    else {
+      for (int i = 0; i < 2; ++i) { if (park_ev_[i]) cudaEventDestroy(park_ev_[i]); park_ev_[i] = nullptr; }
+      if (park_gs_) { cudaStreamDestroy(park_gs_); park_gs_ = nullptr; }
+      if (park_stg_) { cudaFree(park_stg_); park_stg_ = nullptr; }
+      std::fprintf(stderr, "[park] %d MiB device staging not available (%s); using the 3D copies\n",
+                   park_stage_mb_, cudaGetErrorString(ce));
+      cudaGetLastError();
+    }
+  }
+  return park_stg_ && park_stg_half_;
+}
+
+// Each head plane of a KV segment is contiguous on the device: rows [0,pos) at base + head*max_ctx_*row_bytes.  The handle packs
+// the same planes head by head, so the gather/scatter is a list of exact byte spans in handle order.  Returns false (caller falls
+// back to the 3D copies) if the segment offsets are not the prefix 0..kv_bytes or the spans do not sum to it.
+bool Engine35::park_kv_spans(const ParkState& h, std::vector<std::pair<unsigned char*, size_t>>& spans, size_t& kv_bytes) const {
+  spans.clear(); kv_bytes = 0;
+  size_t expect = 0;
+  for (const ParkSeg& s : h.segs) {
+    if (s.layer < 0 || s.kind == PARK_LIN_S || s.kind == PARK_LIN_HIST) continue;
+    const Q35Layer& Y = L_[s.layer];
+    const size_t pkb = (size_t)32 * tbcap_kb_;
+    const unsigned char* base = nullptr; size_t rb = 0;
+    switch (s.kind) {
+      case PARK_KV_K: base = (const unsigned char*)(kv8_ ? (Y.kp ? (const void*)Y.kp : (const void*)Y.k8) : (const void*)Y.kc);
+                       rb = kv8_ ? (Y.kp ? pkb : (size_t)Q35_HD) : (size_t)Q35_HD * 2; break;
+      case PARK_KV_V: base = (const unsigned char*)(kv8_ ? (Y.vp ? (const void*)Y.vp : (const void*)Y.v8) : (const void*)Y.vc);
+                       rb = kv8_ ? (Y.vp ? pkb : (size_t)Q35_HD) : (size_t)Q35_HD * 2; break;
+      case PARK_KV_KS: base = (const unsigned char*)(Y.kp ? (const void*)Y.kps : (const void*)Y.ks); rb = 4; break;
+      case PARK_KV_VS: base = (const unsigned char*)(Y.vp ? (const void*)Y.vps : (const void*)Y.vs); rb = 4; break;
+      default: break;
+    }
+    if (!base || !rb || s.off != expect) return false;
+    expect += s.bytes;
+    kv_bytes += s.bytes;
+    const size_t plane = (size_t)h.pos * rb;
+    for (int q = 0; q < Q35_KVH; ++q) spans.emplace_back(const_cast<unsigned char*>(base) + (size_t)q * max_ctx_ * rb, plane);
+  }
+  size_t sum = 0;
+  for (const auto& sp : spans) sum += sp.second;
+  return !spans.empty() && sum == kv_bytes && expect == kv_bytes;
+}
+
+ParkState* Engine35::park(const int32_t* ids, int n) {
+  if (mtp_.on) throw std::runtime_error("park: MTP drafter state is not parkable yet");
+  if (visual_on_) throw std::runtime_error("park: visual state is not parkable");
+  if (last_M_ != 0 || pre_committed_) throw std::runtime_error("park: state is not committed");
+  if (pos_ < 1) throw std::runtime_error("park: nothing to park");
+  if (!ids) {
+    if (n != 0) throw std::runtime_error("park: ids do not cover the current position");
+    if (!snap_live_ok()) throw std::runtime_error("park: nothing to park");
+    ids = snap_live().data(); n = (int)snap_live().size();
+  }
+  if (n != pos_) throw std::runtime_error("park: ids do not cover the current position");
+  if (snap_live_ok()) {
+    const std::vector<int32_t>& lv = snap_live();
+    if ((int)lv.size() != n || !std::equal(lv.begin(), lv.end(), ids))
+      throw std::runtime_error("park: ids do not cover the current position");
+  }
+  const bool dbg = [] { const char* d = std::getenv("YSKN_PARK_DEBUG"); return d && d[0] && d[0] != '0'; }();
+  const auto t_alloc0 = std::chrono::steady_clock::now();
+  ParkState* h = park_alloc(pos_);
+  const auto t_alloc1 = std::chrono::steady_clock::now();
+  size_t off_S = 0, off_H = 0, off_tok = 0, off_ids = 0;
+  for (const ParkSeg& s : h->segs) {
+    if (s.kind == PARK_LIN_S) { if (!off_S) off_S = s.off; }
+    else if (s.kind == PARK_LIN_HIST) { if (!off_H) off_H = s.off; }
+    else if (s.kind == PARK_TOK) off_tok = s.off;
+    else if (s.kind == PARK_IDS) off_ids = s.off;
+  }
+  replay_fence();
+  cudaEvent_t ev0 = nullptr, ev1 = nullptr, ev2 = nullptr;
+  if (dbg) { cudaEventCreate(&ev0); cudaEventCreate(&ev1); cudaEventCreate(&ev2); cudaEventRecord(ev0, st_); }
+  auto copy3 = [&](const void* src, size_t row_bytes, unsigned char* dst) {
+    cudaMemcpy3DParms p{};
+    // The source holds max_ctx_ rows per head, the handle packs pos rows per head.
+    p.srcPtr = make_cudaPitchedPtr(const_cast<void*>(src), row_bytes, row_bytes, (size_t)max_ctx_);
+    p.dstPtr = make_cudaPitchedPtr(dst, row_bytes, row_bytes, (size_t)h->pos);
+    p.extent = make_cudaExtent(row_bytes, (size_t)h->pos, Q35_KVH);
+    p.kind = cudaMemcpyDeviceToHost;
+    cudaMemcpy3DAsync(&p, st_);
+  };
+  size_t kv_bytes = 0;
+  std::vector<std::pair<unsigned char*, size_t>> spans;
+  bool staged = park_stage_ready() && park_kv_spans(*h, spans, kv_bytes);
+  if (staged) {
+    cudaEventRecord(park_ev_[0], st_);                 // gather stream joins the work already queued on st_
+    cudaStreamWaitEvent(park_gs_, park_ev_[0], 0);
+    bool used[2] = {true, false};
+    size_t si = 0, so = 0, done = 0;
+    while (done < kv_bytes) {
+      const size_t chunk = std::min(park_stg_half_, kv_bytes - done);
+      const int hi = (int)((done / park_stg_half_) & 1);
+      if (used[hi]) cudaStreamWaitEvent(park_gs_, park_ev_[hi], 0);
+      size_t filled = 0;
+      while (filled < chunk) {
+        const size_t take = std::min(chunk - filled, spans[si].second - so);
+        park_gather(spans[si].first + so, park_stg_ + (size_t)hi * park_stg_half_ + filled, take, park_gs_);
+        filled += take; so += take;
+        if (so == spans[si].second) { ++si; so = 0; }
+      }
+      cudaEventRecord(park_ev_[hi], park_gs_);
+      cudaStreamWaitEvent(st_, park_ev_[hi], 0);
+      cudaMemcpyAsync(h->block + done, park_stg_ + (size_t)hi * park_stg_half_, chunk, cudaMemcpyDeviceToHost, st_);
+      cudaEventRecord(park_ev_[hi], st_);              // the next gather of this half waits for this copy
+      used[hi] = true;
+      done += chunk;
+    }
+  }
+  if (!staged) {
+    for (const ParkSeg& s : h->segs) {
+      unsigned char* dst = h->block + s.off;
+      if (s.layer < 0 || s.kind == PARK_LIN_S || s.kind == PARK_LIN_HIST) continue;
+      const Q35Layer& Y = L_[s.layer];
+      const size_t pkb = (size_t)32 * tbcap_kb_;
+      switch (s.kind) {
+        case PARK_KV_K:
+          if (kv8_) copy3(Y.kp ? (const void*)Y.kp : (const void*)Y.k8, Y.kp ? pkb : (size_t)Q35_HD, dst);
+          else copy3(Y.kc, (size_t)Q35_HD * 2, dst);
+          break;
+        case PARK_KV_V:
+          if (kv8_) copy3(Y.vp ? (const void*)Y.vp : (const void*)Y.v8, Y.vp ? pkb : (size_t)Q35_HD, dst);
+          else copy3(Y.vc, (size_t)Q35_HD * 2, dst);
+          break;
+        case PARK_KV_KS: copy3(Y.kp ? Y.kps : Y.ks, 4, dst); break;
+        case PARK_KV_VS: copy3(Y.vp ? Y.vps : Y.vs, 4, dst); break;
+      }
+    }
+  }
+  if (dbg) cudaEventRecord(ev1, st_);
+  linear_out(reinterpret_cast<float*>(h->block + off_S), reinterpret_cast<uint16_t*>(h->block + off_H));
+  cudaMemcpyAsync(h->block + off_tok, d_toks_, 4, cudaMemcpyDeviceToHost, st_);
+  std::memcpy(h->block + off_ids, ids, (size_t)n * 4);
+  if (dbg) cudaEventRecord(ev2, st_);
+  cudaStreamSynchronize(st_);
+  const cudaError_t e = cudaGetLastError();
+  if (e != cudaSuccess) { park_release(h); throw std::runtime_error(std::string("park: ") + cudaGetErrorString(e)); }
+  if (dbg) {
+    float ms_kv = 0.0f, ms_rest = 0.0f;
+    cudaEventElapsedTime(&ms_kv, ev0, ev1); cudaEventElapsedTime(&ms_rest, ev1, ev2);
+    const double ms_alloc = std::chrono::duration<double, std::milli>(t_alloc1 - t_alloc0).count();
+    const double ms_total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_alloc0).count();
+    std::fprintf(stderr, "[park] pos=%d handle=%.1f MiB alloc=%.2f ms reused=%d kv=%.2f ms linear+tail=%.2f ms total=%.2f ms\n",
+                 pos_, h->bytes / 1048576.0, ms_alloc, h->reused ? 1 : 0, ms_kv, ms_rest, ms_total);
+    cudaEventDestroy(ev0); cudaEventDestroy(ev1); cudaEventDestroy(ev2);
+  }
+  h->pos = pos_; h->tok = *reinterpret_cast<int32_t*>(h->block + off_tok);
+  return h;
+}
+void Engine35::resume(const ParkState* h) {
+  // A handle rejected by validation leaves the engine untouched; a device error mid-copy is fatal and the engine is not recoverable.
+  if (!h || h->magic != kParkMagic) throw std::runtime_error("resume: handle is not live");
+  if (h->fingerprint != park_fingerprint()) throw std::runtime_error("resume: handle does not match this engine");
+  if (h->pos < 1 || h->pos > max_ctx_) throw std::runtime_error("resume: handle does not match this engine");
+  if (h->bytes != park_bytes(h->pos) || !h->ids) throw std::runtime_error("resume: handle does not match this engine");
+  size_t off_S = 0, off_H = 0, off_tok = 0;
+  for (const ParkSeg& s : h->segs) {
+    if (s.kind == PARK_LIN_S) { if (!off_S) off_S = s.off; }
+    else if (s.kind == PARK_LIN_HIST) { if (!off_H) off_H = s.off; }
+    else if (s.kind == PARK_TOK) off_tok = s.off;
+  }
+  const bool dbg = [] { const char* d = std::getenv("YSKN_PARK_DEBUG"); return d && d[0] && d[0] != '0'; }();
+  const auto t_start = std::chrono::steady_clock::now();
+  cudaEvent_t ev0 = nullptr, ev1 = nullptr, ev2 = nullptr;
+  replay_fence();
+  if (dbg) { cudaEventCreate(&ev0); cudaEventCreate(&ev1); cudaEventCreate(&ev2); cudaEventRecord(ev0, st_); }
+  // The handle does not carry the drafter's KV ring or the HCAP capture buffer.  Zero them instead of leaving the previous
+  // context's rows at the same absolute positions; this mirrors the MTP refusal above (that state is not parkable yet).
+  if (bdr_.on) for (int i = 0; i < 5; ++i) {
+    cudaMemsetAsync(bdr_.rk[i], 0, kBdrRingBytes, st_);
+    cudaMemsetAsync(bdr_.rv[i], 0, kBdrRingBytes, st_);
+  }
+  if (cap_) cudaMemsetAsync(cap_, 0, (size_t)cap_layers_.size() * Pmax_ * H_ * 4, st_);
+  auto copy3 = [&](const void* src, size_t row_bytes, void* dst) {
+    cudaMemcpy3DParms p{};
+    // Source rows are packed pos per head; the engine keeps max_ctx_ rows per head.
+    p.srcPtr = make_cudaPitchedPtr(const_cast<void*>(src), row_bytes, row_bytes, (size_t)h->pos);
+    p.dstPtr = make_cudaPitchedPtr(dst, row_bytes, row_bytes, (size_t)max_ctx_);
+    p.extent = make_cudaExtent(row_bytes, (size_t)h->pos, Q35_KVH);
+    p.kind = cudaMemcpyHostToDevice;
+    cudaMemcpy3DAsync(&p, st_);
+  };
+  // Mirror of park: copy handle chunks contiguously into one half of the shared staging buffer, then scatter them into the KV
+  // planes on the gather stream, overlapping chunk i+1's HtoD with chunk i's scatter.  The same two halves and events are used.
+  size_t kv_bytes = 0;
+  std::vector<std::pair<unsigned char*, size_t>> spans;
+  bool staged = park_stage_ready() && park_kv_spans(*h, spans, kv_bytes);
+  if (staged) {
+    bool used[2] = {false, false};
+    size_t si = 0, so = 0, done = 0;
+    while (done < kv_bytes) {
+      const size_t chunk = std::min(park_stg_half_, kv_bytes - done);
+      const int hi = (int)((done / park_stg_half_) & 1);
+      if (used[hi]) cudaStreamWaitEvent(st_, park_ev_[hi], 0);        // the previous scatter of this half must finish
+      cudaMemcpyAsync(park_stg_ + (size_t)hi * park_stg_half_, h->block + done, chunk, cudaMemcpyHostToDevice, st_);
+      cudaEventRecord(park_ev_[hi], st_);
+      cudaStreamWaitEvent(park_gs_, park_ev_[hi], 0);
+      size_t filled = 0;
+      while (filled < chunk) {
+        const size_t take = std::min(chunk - filled, spans[si].second - so);
+        park_gather(park_stg_ + (size_t)hi * park_stg_half_ + filled, spans[si].first + so, take, park_gs_);
+        filled += take; so += take;
+        if (so == spans[si].second) { ++si; so = 0; }
+      }
+      cudaEventRecord(park_ev_[hi], park_gs_);
+      used[hi] = true;
+      done += chunk;
+    }
+    // The final scatter is on the gather stream; st_ joins it before the sync below so the KV writes are complete.  The wait
+    // is placed after linear_in so the linear copies overlap the last scatters.
+    if (dbg) cudaEventRecord(ev1, park_gs_);
+    else cudaEventRecord(park_ev_[0], park_gs_);
+  } else {
+    for (const ParkSeg& s : h->segs) {
+      const unsigned char* src = h->block + s.off;
+      if (s.layer < 0 || s.kind == PARK_LIN_S || s.kind == PARK_LIN_HIST) continue;
+      Q35Layer& Y = L_[s.layer];
+      const size_t pkb = (size_t)32 * tbcap_kb_;
+      switch (s.kind) {
+        case PARK_KV_K:
+          if (kv8_) copy3(src, Y.kp ? pkb : (size_t)Q35_HD, Y.kp ? (void*)Y.kp : (void*)Y.k8);
+          else copy3(src, (size_t)Q35_HD * 2, Y.kc);
+          break;
+        case PARK_KV_V:
+          if (kv8_) copy3(src, Y.vp ? pkb : (size_t)Q35_HD, Y.vp ? (void*)Y.vp : (void*)Y.v8);
+          else copy3(src, (size_t)Q35_HD * 2, Y.vc);
+          break;
+        case PARK_KV_KS: copy3(src, 4, Y.kp ? (void*)Y.kps : (void*)Y.ks); break;
+        case PARK_KV_VS: copy3(src, 4, Y.vp ? (void*)Y.vps : (void*)Y.vs); break;
+      }
+    }
+    if (dbg) cudaEventRecord(ev1, st_);
+  }
+  linear_in(reinterpret_cast<const float*>(h->block + off_S), reinterpret_cast<const uint16_t*>(h->block + off_H));
+  cudaMemcpyAsync(d_toks_, h->block + off_tok, 4, cudaMemcpyHostToDevice, st_);
+  launch_set_int(d_pos_, h->pos, st_);
+  if (staged) cudaStreamWaitEvent(st_, dbg ? ev1 : park_ev_[0], 0);
+  if (dbg) cudaEventRecord(ev2, st_);
+  cudaStreamSynchronize(st_);
+  const cudaError_t e = cudaGetLastError();
+  if (e != cudaSuccess) throw std::runtime_error(std::string("resume: ") + cudaGetErrorString(e));
+  if (dbg) {
+    float ms_kv = 0.0f, ms_rest = 0.0f;
+    cudaEventElapsedTime(&ms_kv, ev0, ev1); cudaEventElapsedTime(&ms_rest, ev1, ev2);
+    const double ms_total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_start).count();
+    std::fprintf(stderr, "[resume] pos=%d handle=%.1f MiB kv=%.2f ms linear+tail=%.2f ms total=%.2f ms\n",
+                 h->pos, h->bytes / 1048576.0, ms_kv, ms_rest, ms_total);
+    cudaEventDestroy(ev0); cudaEventDestroy(ev1); cudaEventDestroy(ev2);
+  }
+  snap_drop();
+  pos_ = h->pos; last_M_ = 0; pre_committed_ = false;
+  ++sh_epoch_; sh_cur_.assign(h->ids, h->ids + h->pos); sh_note_ = sh_epoch_;
+}
 
 void Engine35::load_bdraft(const std::string& path) {
   DevMemScope instance_owner(this);
@@ -1632,7 +2021,7 @@ void Engine35::load_bdraft(const std::string& path) {
     bdr_.ln1[i] = vec(pf + "ln1", 5120, &bdr_.c); bdr_.ln2[i] = vec(pf + "ln2", 5120, &bdr_.c);
     bdr_.qn[i] = vec(pf + "q_norm", 128, &bdr_.c); bdr_.kn[i] = vec(pf + "k_norm", 128, &bdr_.c);
     bdr_.abase[i] = vec(pf + "abase", 4 * 5120, &bdr_.c); bdr_.mbase[i] = vec(pf + "mbase", 4 * 5120, &bdr_.c);
-    bdr_.rk[i] = dz35<uint16_t>((size_t)8 * 2048 * 128 * 2); bdr_.rv[i] = dz35<uint16_t>((size_t)8 * 2048 * 128 * 2);
+    bdr_.rk[i] = dz35<uint16_t>(kBdrRingBytes); bdr_.rv[i] = dz35<uint16_t>(kBdrRingBytes);
   }
   bdr_.hp = vec("bdraft2.sel.hp", (size_t)256 * 5120, &bdr_.c);
   bdr_.pc = vec("bdraft2.sel.pred", (size_t)V_ * 256, &bdr_.c); bdr_.sc = vec("bdraft2.sel.succ", (size_t)V_ * 256, &bdr_.c);

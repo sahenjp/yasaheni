@@ -14,7 +14,7 @@
 
 typedef struct { int32_t *ids; int n; int loop_from; } script_t;
 typedef struct yskn_engine {
-    int max_ctx, pos, draft;
+    int max_ctx, pos, draft, tok;
     atomic_int cancel;
     int32_t *hist; int nhist;
     int32_t *snap; int nsnap;
@@ -55,7 +55,7 @@ EXPORT yskn_engine *yskn_open(const char *path, int max_ctx, int device, int fla
     return e;
 }
 EXPORT void yskn_close(yskn_engine *e) { if (e) { free(e->hist); free(e->snap); free(e); } }
-EXPORT int yskn_reset(yskn_engine *e) { free(e->hist); e->hist = 0; e->nhist = 0; e->pos = 0; return 0; }
+EXPORT int yskn_reset(yskn_engine *e) { free(e->hist); e->hist = 0; e->nhist = 0; e->pos = 0; free(e->snap); e->snap = 0; e->nsnap = 0; return 0; }
 EXPORT int yskn_position(yskn_engine *e) { return e->pos; }
 EXPORT const char *yskn_last_error(void) { return g_err; }
 EXPORT int yskn_cancel(yskn_engine *e) { atomic_store(&e->cancel, 1); return 0; }
@@ -74,6 +74,78 @@ EXPORT int yskn_state_hash(yskn_engine *e, uint64_t *out, int max_out, int *n_ou
     if (max_out < 2) { set_err("state_hash: buffer too small"); return 1; }
     out[0] = (uint64_t)e->pos; out[1] = h; *n_out = 2; return 0;
 }
+EXPORT int yskn_snap_info(yskn_engine *e, int32_t *out4, int32_t *ids, int max_ids) {
+    g_err[0] = 0;
+    out4[0] = e->pos; out4[1] = -1; out4[2] = e->nhist > 0 ? 1 : 0; out4[3] = e->nhist;
+    if (ids) for (int i = 0; i < e->nhist && i < max_ids; i++) ids[i] = e->hist[i];
+    return 0;
+}
+
+#define PARK_MAGIC 0x59534b4e5041524bULL   /* "YSKNPARK" */
+struct yskn_park {
+    uint64_t magic, fp;
+    size_t bytes;
+    int pos, tok, nids, nhist;
+    int32_t *ids, *hist;
+};
+
+EXPORT int yskn_park_size(yskn_engine *e, int pos, size_t *bytes) {
+    (void)e;
+    if (pos < 0) { set_err("park: position out of range"); return 1; }
+    *bytes = sizeof(struct yskn_park) + (size_t)pos * 8 + 4;
+    return 0;
+}
+EXPORT int yskn_park(yskn_engine *e, const int32_t *ids, int n, struct yskn_park **out) {
+    g_err[0] = 0;
+    if (!e || e->pos < 1) { set_err("park: nothing to park"); return 1; }
+    const int32_t *src; int cnt;
+    if (ids) {
+        if (n != e->pos) { set_err("park: ids do not cover the current position"); return 1; }
+        for (int i = 0; i < n && i < e->nhist; i++)
+            if (ids[i] != e->hist[i]) { set_err("park: ids do not cover the current position"); return 1; }
+        src = ids; cnt = n;
+    } else {
+        if (n != 0 || e->nhist < 1) { set_err("park: nothing to park"); return 1; }
+        src = e->hist; cnt = e->nhist;
+    }
+    struct yskn_park *h = calloc(1, sizeof *h);
+    h->ids = malloc(sizeof(int32_t) * (cnt > 0 ? cnt : 1));
+    h->hist = malloc(sizeof(int32_t) * (cnt > 0 ? cnt : 1));
+    memcpy(h->ids, src, sizeof(int32_t) * cnt);
+    memcpy(h->hist, src, sizeof(int32_t) * cnt);
+    h->pos = cnt; h->nids = cnt; h->nhist = cnt;
+    h->tok = e->tok;
+    h->bytes = sizeof(struct yskn_park) + (size_t)cnt * 8 + 4;
+    h->fp = (uint64_t)(uint32_t)e->max_ctx;
+    h->magic = PARK_MAGIC;
+    *out = h;
+    return 0;
+}
+EXPORT int yskn_resume(yskn_engine *e, const struct yskn_park *h) {
+    g_err[0] = 0;
+    if (!h || h->magic != PARK_MAGIC) { set_err("resume: handle is not live"); return 1; }
+    if (h->fp != (uint64_t)(uint32_t)e->max_ctx || h->pos < 1 || h->pos > e->max_ctx) {
+        set_err("resume: handle does not match this engine"); return 1;
+    }
+    free(e->hist);
+    e->hist = malloc(sizeof(int32_t) * (h->nhist > 0 ? h->nhist : 1));
+    memcpy(e->hist, h->hist, sizeof(int32_t) * h->nhist);
+    e->nhist = h->nhist; e->pos = h->pos; e->tok = h->tok;
+    return 0;
+}
+EXPORT int yskn_park_info(const struct yskn_park *h, int32_t *out4, size_t *bytes) {
+    g_err[0] = 0;
+    if (!h || h->magic != PARK_MAGIC) { set_err("park: handle is not live"); return 1; }
+    if (out4) { out4[0] = h->pos; out4[1] = h->pos; out4[2] = 0; out4[3] = h->tok; }
+    if (bytes) *bytes = h->bytes;
+    return 0;
+}
+EXPORT void yskn_park_free(struct yskn_park *h) {
+    if (!h || h->magic != PARK_MAGIC) return;
+    h->magic = 0;
+    free(h->ids); free(h->hist); free(h);
+}
+
 
 static int lcp(const int32_t *a, int na, const int32_t *b, int nb) { int i = 0; while (i < na && i < nb && a[i] == b[i]) i++; return i; }
 
@@ -129,7 +201,7 @@ EXPORT int yskn_spec_generate(yskn_engine *e, const int32_t *prompt, int n_promp
     int nh = n_prompt + idx - 1;
     int32_t *h = malloc(sizeof(int32_t) * (nh > 0 ? nh : 1));
     memcpy(h, prompt, sizeof(int32_t) * n_prompt); memcpy(h + n_prompt, out, sizeof(int32_t) * (idx - 1));
-    free(e->hist); e->hist = h; e->nhist = nh; e->pos = nh;
+    free(e->hist); e->hist = h; e->nhist = nh; e->pos = nh; e->tok = idx > 0 ? out[idx - 1] : 0;
     if (snap_on && snap_tok >= 0) {                       /* snapshot right after the last chat-start marker of the prompt */
         int last = -1; for (int i = 0; i < n_prompt; i++) if (prompt[i] == snap_tok) last = i;
         if (last >= 0) { free(e->snap); e->nsnap = last + 1; e->snap = malloc(sizeof(int32_t) * e->nsnap); memcpy(e->snap, prompt, sizeof(int32_t) * e->nsnap); }

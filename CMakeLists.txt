@@ -54,6 +54,7 @@ add_library(yskn SHARED
   src/loader.cpp
   src/misc_kernels.cu
   src/pfa.cu
+  src/park_gather.cu
   src/post_kernels.cu
   src/q35_atx.cu
   src/q35_atxpk.cu

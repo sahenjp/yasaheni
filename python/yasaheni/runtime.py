@@ -42,6 +42,8 @@ DEFAULT_ENV: Dict[str, str] = {
     "YSKN_ATX_VSP": "7",
 }
 PATH_ENV = ("YSKN_BDR_SHEAD", "YSKN_TB_PROFILE")
+# Process settings that are not part of the model configuration: a profile keeps a value set in the shell instead of removing it.
+PASS_ENV = ("YSKN_PARK_REUSE", "YSKN_PARK_DEBUG", "YSKN_PARK_STAGE_MB")
 
 # ---- speculation settings: the 44 integers of the generation call, in the order the engine reads them ----------------------------
 SPEC_FIELDS = ("gamma", "use_d0", "use_d1", "d0_nmin", "d0_nmax", "d0_priority_n", "extend", "d1_rejected", "auto_gamma", "use_graph",
@@ -94,7 +96,7 @@ class RuntimeProfile:
         """Make the process environment exactly this profile: engine settings left over from the shell are removed first (a stale
         setting would silently change the engine).  Returns the names that were removed."""
         environ = os.environ if environ is None else environ
-        removed = [k for k in list(environ) if k.startswith("YSKN_") and k not in self.env]
+        removed = [k for k in list(environ) if k.startswith("YSKN_") and k not in self.env and k not in PASS_ENV]
         for k in removed:
             environ.pop(k)
         environ.update(self.env)
@@ -113,6 +115,7 @@ class ModelPack:
     model_id: str = "qwen3.8-27b"
     sha256: Dict[str, str] = field(default_factory=dict)
 
+    MANIFESTS = ("yasaheni.json", "yasakani.json")
     DEFAULT_FILES = dict(weights="qwen38_27b_e3x.yskn", draft="bdraft2_k8.yskn", draft_head="bdraft2_k8.shead", kv_profile="kvq_u5.bin")
 
     @classmethod
@@ -122,8 +125,8 @@ class ModelPack:
             raise YasakaniError("model folder not found: %s" % root)
         files = dict(cls.DEFAULT_FILES)
         meta = {}
-        mf = root / "yasaheni.json"
-        if mf.is_file():
+        mf = next((root / n for n in cls.MANIFESTS if (root / n).is_file()), None)
+        if mf is not None:
             meta = json.loads(mf.read_text(encoding="utf-8"))
             files.update(meta.get("files") or {})
         paths = {k: root / v for k, v in files.items() if k in cls.DEFAULT_FILES}

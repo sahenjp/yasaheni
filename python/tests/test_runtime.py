@@ -30,12 +30,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(all(k.startswith("YSKN_") for k in prof.env))
 
     def test_apply_removes_stale_settings(self):
-        env = {"YSKN_Q35_PMAX": "7", "YSKN_SOMETHING_ELSE": "1", "PATH": "/bin"}
+        env = {"YSKN_Q35_PMAX": "7", "YSKN_SOMETHING_ELSE": "1", "YSKN_PARK_REUSE": "0", "PATH": "/bin"}
         with tempfile.TemporaryDirectory() as t:
             prof = R.RuntimeProfile.default(support.make_pack(Path(t)))
         removed = prof.apply(env)
         self.assertEqual(removed, ["YSKN_SOMETHING_ELSE"])
         self.assertEqual(env["YSKN_Q35_PMAX"], "1024")
+        self.assertEqual(env["YSKN_PARK_REUSE"], "0")
         self.assertEqual(env["PATH"], "/bin")
 
     def test_override_must_be_engine_setting(self):
@@ -54,6 +55,31 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(Exception) as cm:
                 R.ModelPack.load(root)
             self.assertIn("missing", str(cm.exception))
+
+    @staticmethod
+    def _manifest_folder(tmp, names, manifest):
+        root = Path(tmp) / "m"
+        root.mkdir()
+        for f in list(names) + ["bdraft2_k8.yskn", "bdraft2_k8.shead", "kvq_u5.bin", "tokenizer.json", "tokenizer_config.json"]:
+            (root / f).write_bytes(b"x")
+        (root / manifest[0]).write_text(manifest[1], encoding="utf-8")
+        return root
+
+    def test_yasakani_manifest_is_read(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = self._manifest_folder(t, ["qwen38_27b_quality.yskn"],
+                                         ("yasakani.json", '{"files": {"weights": "qwen38_27b_quality.yskn"}, "max_ctx": 131072}'))
+            pack = R.ModelPack.load(root)
+        self.assertEqual(pack.weights.name, "qwen38_27b_quality.yskn")
+        self.assertEqual(pack.max_ctx, 131072)
+
+    def test_yasaheni_manifest_wins_when_both_exist(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = self._manifest_folder(t, ["qwen38_27b_quality.yskn", "qwen38_27b_speed.yskn"],
+                                         ("yasakani.json", '{"files": {"weights": "qwen38_27b_quality.yskn"}}'))
+            (root / "yasaheni.json").write_text('{"files": {"weights": "qwen38_27b_speed.yskn"}}', encoding="utf-8")
+            pack = R.ModelPack.load(root)
+        self.assertEqual(pack.weights.name, "qwen38_27b_speed.yskn")
 
 
 if __name__ == "__main__":
