@@ -57,6 +57,7 @@ class Stub:
         d = self.lib.dll
         d.stub_push_script.argtypes = [C.c_void_p, C.c_int, C.c_int]
         d.stub_set_delay_us.argtypes = [C.c_int]
+        d.stub_set_rc.argtypes = [C.c_int]
         d.stub_get_opt.argtypes = [C.c_void_p, C.c_int]
         d.stub_get_opt.restype = C.c_int
         d.stub_calls.restype = C.c_int
@@ -73,6 +74,9 @@ class Stub:
 
     def delay_us(self, us):
         self.d.stub_set_delay_us(us)
+
+    def set_rc(self, rc):
+        self.d.stub_set_rc(rc)
 
     def opt(self, engine, key):
         return self.d.stub_get_opt(engine._e, key)
