@@ -61,6 +61,7 @@ YSKN_API int           yskn_verify_device(yskn_engine* e, int M, int use_graph, 
 YSKN_API int           yskn_set_verify_tokens(yskn_engine* e, const int32_t* ids, int first_row, int n);
 YSKN_API int           yskn_draft_catchup(yskn_engine* e, int p0, int n, const int32_t* toks, int use_graph);
 YSKN_API int           yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_prompt, int n_gen, const int32_t* cfg, int n_cfg, int32_t* out_ids, double* stats, double* times_ms);
+// Returns 0 on success, -2 if cancelled between prefill chunks (prompt state ends at the last committed chunk), -1 on error.
 
 
 

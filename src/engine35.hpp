@@ -7,6 +7,7 @@
 
 
 
+#include <atomic>
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -18,6 +19,10 @@
 #include "args.hpp"
 #include "q35_g6.hpp"
 namespace yskn {
+
+// Thrown by prefill when the caller cancelled between chunks: the prompt up to the last committed chunk stays in the KV cache.
+struct PrefillCancelled : std::runtime_error { PrefillCancelled() : std::runtime_error("prefill: cancelled") {} };
+
 struct Shared35Weights;
 struct Q35Layer {
   bool full = false;
@@ -52,6 +57,7 @@ public:
   void shared_info(uint64_t* out) const;
   void reset();
   int  prefill(const int32_t* ids, int n);                 
+  void set_cancel(const std::atomic<int>* cancel) { cancel_ = cancel; }   // polled by prefill between chunks; nullptr = never cancel
   
   
   
@@ -341,6 +347,8 @@ private:
   bool layer_prepare(); void layer_decode(int l);
   int prefill_vsp(const int32_t* ids,int n);
   int prefill_chunks(const int32_t* ids,int n);
+  const std::atomic<int>* cancel_ = nullptr;
+  void prefill_cancel_check() { if (cancel_ && cancel_->load(std::memory_order_relaxed) != 0) { last_M_ = 0; pre_committed_ = false; throw PrefillCancelled(); } }
 public:
   void nll_layer(const int32_t* ids,int n,float* out);
   void layer_info(uint64_t* out) const { out[0]=layer_ready_;out[1]=layer_unavailable_;out[2]=tc_rows_;out[3]=ovl_;out[4]=layer_weight_bytes_;out[5]=layer_rows_; }
