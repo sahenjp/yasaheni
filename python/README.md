@@ -138,8 +138,9 @@ with Engine(pack, max_ctx=32768, dll=r"D:\yasakani\yskn.dll") as eng:
 ## Settings and environment
 
 The package sets the engine's environment variables itself (`yasakani.runtime.DEFAULT_ENV`) and removes any other `YSKN_*` variable left in your shell
-before it opens the model, because a stray setting silently changes the engine. The published results were measured with the defaults; changing them
-means running an engine configuration that the self-check and the published numbers do not cover.
+before it opens the model, because a stray setting silently changes the engine. The tuning-only `YSKN_LNO_CFG`, `YSKN_LNO_CFG_TAB` and
+`YSKN_BDR_CFG` are kept (`yasakani.runtime.PASS_ENV`). The published results were measured with the defaults; changing them means running an engine
+configuration that the self-check and the published numbers do not cover.
 
 ## Troubleshooting
 

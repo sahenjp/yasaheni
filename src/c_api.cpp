@@ -12,6 +12,12 @@ namespace yskn { extern std::atomic<int> g_specx_cancel; }
 static thread_local std::string g_err;
 struct yskn_engine { yskn::Engine* e; yskn::Engine35* q; std::atomic<int> cancel{0}; };   
 static yskn::Engine& E(yskn_engine* e) { if (!e->e) throw std::runtime_error("this API is not available for the qwen3_5 engine yet"); return *e->e; }
+static bool select_device(int device) {
+  const cudaError_t e = cudaSetDevice(device);
+  if (e == cudaSuccess) return true;
+  g_err = "cannot select CUDA device " + std::to_string(device) + ": " + cudaGetErrorString(e);
+  return false;
+}
 #define YSKN_TRY(body) try { body; return 0; } catch (const std::exception& ex) { g_err = ex.what(); return -1; }
 // Route on the first four bytes. "YSKN" keeps the original path untouched.
 //
@@ -49,7 +55,7 @@ extern "C" yskn_engine* yskn_open(const char* path, int max_ctx, int device, int
       // GgufContainer cannot materialise, or a kernel constraint the gate does
       // not model) comes back as the engine's own message, not a probe error.
       try {
-        cudaSetDevice(device);
+        if (!select_device(device)) return nullptr;
         return new yskn_engine{new yskn::Engine(path, max_ctx, flags), nullptr};
       } catch (const std::exception& ex) {
         g_err = "cannot load GGUF model '" + std::string(path) + "': " + ex.what();
@@ -61,7 +67,7 @@ extern "C" yskn_engine* yskn_open(const char* path, int max_ctx, int device, int
       return nullptr;
     }
   }
-  try { cudaSetDevice(device); std::string arch; { yskn::Container c; c.open(path); arch = c.model.arch; }
+  try { if (!select_device(device)) return nullptr; std::string arch; { yskn::Container c; c.open(path); arch = c.model.arch; }
     if (arch == "qwen3_5") return new yskn_engine{nullptr, new yskn::Engine35(path, max_ctx, flags)};
     return new yskn_engine{new yskn::Engine(path, max_ctx, flags), nullptr}; } catch (const std::exception& ex) { g_err = ex.what(); return nullptr; }
 }

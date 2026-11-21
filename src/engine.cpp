@@ -31,6 +31,11 @@ template <class T2> static T2* dz(size_t bytes) { T2* p = nullptr; cudaMalloc(&p
 
 Engine::Engine(const std::string& path, int max_ctx, int flags) : flags_(flags) {
   DevMemScope dm_scope(this);
+  // Bind the LNORD table to the device that is current on this (the opening) thread and log it,
+  // so the legacy and GGUF paths do not defer the query to the first launch on another thread.
+  { int tab[9] = {0}, cc_major = -1, cc_minor = -1; lnord_cfg_table(tab, &cc_major, &cc_minor);
+    std::fprintf(stderr, "[qwen3_5] LNORD cfg M=0..8: %d %d %d %d %d %d %d %d %d (compute capability %d.%d)\n",
+                 tab[0], tab[1], tab[2], tab[3], tab[4], tab[5], tab[6], tab[7], tab[8], cc_major, cc_minor); }
   { const char* e = std::getenv("YSKN_NO_A4B"); a4b_ = !(e && e[0] == '1'); }
   { const char* e = std::getenv("YSKN_PFA"); if (e && e[0]) pfa_ = std::atoi(e);          
     const char* m = std::getenv("YSKN_PFA_M"); if (m && std::atoi(m) > 0) tpm_ = std::atoi(m);

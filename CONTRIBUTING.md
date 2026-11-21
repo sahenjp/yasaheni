@@ -13,11 +13,12 @@ This is a fork of [YASAKANI](https://github.com/yasakani-dev/yasakani) that port
 ```bash
 scripts/check-env.sh
 scripts/build-linux.sh
-cd tests/gguf && cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure
+cmake -S tests/gguf -B build-gguf -G Ninja && cmake --build build-gguf && ctest --test-dir build-gguf --output-on-failure
+cmake -S tests/lnord_tab -B build-lnord_tab -G Ninja && cmake --build build-lnord_tab && ctest --test-dir build-lnord_tab --output-on-failure
 python3 -m unittest discover -s python/tests -t python
 ```
 
-All four must pass. The C++ tests need no GPU.
+All five must pass. The C++ tests need no GPU.
 
 ## What needs its own test results
 

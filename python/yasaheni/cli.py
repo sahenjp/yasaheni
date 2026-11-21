@@ -163,6 +163,8 @@ def _open_stack(args, *, warm: bool = True):
     try:
         if eng.removed_env:
             _say("note: ignored %d YSKN_* setting(s) from the environment: %s" % (len(eng.removed_env), ", ".join(sorted(eng.removed_env))))
+        if eng.kept_env:
+            _say("note: kept tuning settings: %s" % ", ".join(sorted(eng.kept_env)))
         runner = ChatRunner(eng, fmt, seed0=args.seed0, vision=vision)
         if warm:
             runner.warmup()

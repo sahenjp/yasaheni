@@ -42,6 +42,21 @@ DEFAULT_ENV: Dict[str, str] = {
     "YSKN_ATX_VSP": "7",
 }
 PATH_ENV = ("YSKN_BDR_SHEAD", "YSKN_TB_PROFILE")
+# Process settings that are not part of the model configuration: a profile keeps a value set in the shell instead of removing it.
+PASS_ENV = ("YSKN_LNO_CFG", "YSKN_LNO_CFG_TAB", "YSKN_BDR_CFG")
+
+# ---- tuning-only engine settings ---------------------------------------------------------------------------------------------------
+# Read by the engine when a model is opened, but deliberately not part of DEFAULT_ENV: the published numbers were measured without them.
+# They are in PASS_ENV, so a value set in the shell survives RuntimeProfile.apply and reaches the engine through the command line
+# and the server. The engine reads them once per process: a profile value therefore decides the table only for the first engine
+# opened in that process, and a later engine keeps the value the first one read.
+#   YSKN_LNO_CFG      force one LNORD launch configuration (0..2) for every verify-batch size M; it wins over the per-M table.
+#                     Values outside 0..2 are ignored with one warning line.
+#   YSKN_LNO_CFG_TAB  comma-separated overrides for M=0..8, e.g. "0,1,1,1,1,1,1,1,1". Entries left out keep the device default:
+#                     {0,1,1,1,1,1,1,1,1} on compute capability 8.6 (measured on the RTX 3090), {0,1,2,1,2,2,2,2,2} everywhere else,
+#                     including the other 8.x parts, which are unmeasured.
+#   YSKN_BDR_CFG      the same forced configuration for the drafter head's LNORD launches; values outside 0..2 are also ignored.
+# A malformed YSKN_LNO_CFG_TAB is reported once at engine open and ignored.
 
 # ---- speculation settings: the 44 integers of the generation call, in the order the engine reads them ----------------------------
 SPEC_FIELDS = ("gamma", "use_d0", "use_d1", "d0_nmin", "d0_nmax", "d0_priority_n", "extend", "d1_rejected", "auto_gamma", "use_graph",
@@ -78,6 +93,7 @@ def spec_array(spec: Dict[str, int]):
 class RuntimeProfile:
     """Environment variables applied before the model is opened."""
     env: Dict[str, str] = field(default_factory=dict)
+    kept_env: List[str] = field(default_factory=list, init=False, repr=False, compare=False)
 
     @classmethod
     def default(cls, pack: "ModelPack", overrides: Optional[Dict[str, str]] = None) -> "RuntimeProfile":
@@ -91,13 +107,16 @@ class RuntimeProfile:
         return cls(env)
 
     def apply(self, environ=None) -> List[str]:
-        """Make the process environment exactly this profile: engine settings left over from the shell are removed first (a stale
-        setting would silently change the engine).  Returns the names that were removed."""
+        """Make the process environment this profile: engine settings left over from the shell are removed first (a stale
+        setting would silently change the engine), except the tuning-only ``PASS_ENV`` settings, which are kept.  Returns the
+        names that were removed; ``kept_env`` holds the kept tuning settings that came from the shell."""
         environ = os.environ if environ is None else environ
-        removed = [k for k in list(environ) if k.startswith("YSKN_") and k not in self.env]
+        kept = [k for k in PASS_ENV if k in environ and k not in self.env]
+        removed = [k for k in list(environ) if k.startswith("YSKN_") and k not in self.env and k not in PASS_ENV]
         for k in removed:
             environ.pop(k)
         environ.update(self.env)
+        self.kept_env = kept
         return removed
 
 
