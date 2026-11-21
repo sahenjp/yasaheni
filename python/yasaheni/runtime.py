@@ -43,12 +43,14 @@ DEFAULT_ENV: Dict[str, str] = {
 }
 PATH_ENV = ("YSKN_BDR_SHEAD", "YSKN_TB_PROFILE")
 # Process settings that are not part of the model configuration: a profile keeps a value set in the shell instead of removing it.
-PASS_ENV = ("YSKN_LNO_CFG", "YSKN_LNO_CFG_TAB", "YSKN_BDR_CFG")
+PASS_ENV = ("YSKN_LNO_CFG", "YSKN_LNO_CFG_TAB", "YSKN_BDR_CFG", "YSKN_G6_TILEGRID")
 
 # ---- tuning-only engine settings ---------------------------------------------------------------------------------------------------
 # Read by the engine when a model is opened, but deliberately not part of DEFAULT_ENV: the published numbers were measured without them.
 # They are in PASS_ENV, so a value set in the shell survives RuntimeProfile.apply and reaches the engine through the command line
-# and the server. The engine reads them once per process: a profile value therefore decides the table only for the first engine
+# and the server.
+#
+# The engine reads the LNORD settings once per process: a profile value therefore decides the table only for the first engine
 # opened in that process, and a later engine keeps the value the first one read.
 #   YSKN_LNO_CFG      force one LNORD launch configuration (0..2) for every verify-batch size M; it wins over the per-M table.
 #                     Values outside 0..2 are ignored with one warning line.
@@ -57,6 +59,10 @@ PASS_ENV = ("YSKN_LNO_CFG", "YSKN_LNO_CFG_TAB", "YSKN_BDR_CFG")
 #                     including the other 8.x parts, which are unmeasured.
 #   YSKN_BDR_CFG      the same forced configuration for the drafter head's LNORD launches; values outside 0..2 are also ignored.
 # A malformed YSKN_LNO_CFG_TAB is reported once at engine open and ignored.
+#
+# The q35_g6 setting is read on every launch, so one process can change it between calls.
+#   YSKN_G6_TILEGRID  the q35_g6 prefill launch grid: 0 is the split-K grid, 1 is one block per output tile. Unset means the
+#                     device default, which is the tile grid on compute capability 8.6 and split-K everywhere else.
 
 # ---- speculation settings: the 44 integers of the generation call, in the order the engine reads them ----------------------------
 SPEC_FIELDS = ("gamma", "use_d0", "use_d1", "d0_nmin", "d0_nmax", "d0_priority_n", "extend", "d1_rejected", "auto_gamma", "use_graph",

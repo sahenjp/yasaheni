@@ -42,15 +42,16 @@ class RuntimeTests(unittest.TestCase):
 
     def test_apply_keeps_tuning_settings(self):
         env = {"YSKN_LNO_CFG": "1", "YSKN_LNO_CFG_TAB": "0,1,1,1,1,1,1,1,1", "YSKN_BDR_CFG": "2",
-               "YSKN_SOMETHING_ELSE": "1", "PATH": "/bin"}
+               "YSKN_G6_TILEGRID": "0", "YSKN_SOMETHING_ELSE": "1", "PATH": "/bin"}
         with tempfile.TemporaryDirectory() as t:
             prof = R.RuntimeProfile.default(support.make_pack(Path(t)))
         removed = prof.apply(env)
         self.assertEqual(removed, ["YSKN_SOMETHING_ELSE"])
-        self.assertEqual(prof.kept_env, ["YSKN_LNO_CFG", "YSKN_LNO_CFG_TAB", "YSKN_BDR_CFG"])
+        self.assertEqual(prof.kept_env, ["YSKN_LNO_CFG", "YSKN_LNO_CFG_TAB", "YSKN_BDR_CFG", "YSKN_G6_TILEGRID"])
         self.assertEqual(env["YSKN_LNO_CFG"], "1")
         self.assertEqual(env["YSKN_LNO_CFG_TAB"], "0,1,1,1,1,1,1,1,1")
         self.assertEqual(env["YSKN_BDR_CFG"], "2")
+        self.assertEqual(env["YSKN_G6_TILEGRID"], "0")
         self.assertEqual(env["PATH"], "/bin")
 
     def test_profile_tuning_value_wins_over_shell(self):

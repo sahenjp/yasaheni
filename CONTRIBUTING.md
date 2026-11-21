@@ -15,10 +15,11 @@ scripts/check-env.sh
 scripts/build-linux.sh
 cmake -S tests/gguf -B build-gguf -G Ninja && cmake --build build-gguf && ctest --test-dir build-gguf --output-on-failure
 cmake -S tests/lnord_tab -B build-lnord_tab -G Ninja && cmake --build build-lnord_tab && ctest --test-dir build-lnord_tab --output-on-failure
+cmake -S tests/q35_g6_tab -B build-q35_g6_tab -G Ninja && cmake --build build-q35_g6_tab && ctest --test-dir build-q35_g6_tab --output-on-failure
 python3 -m unittest discover -s python/tests -t python
 ```
 
-All five must pass. The C++ tests need no GPU.
+All six must pass. The C++ tests need no GPU.
 
 ## What needs its own test results
 
