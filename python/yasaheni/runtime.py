@@ -103,7 +103,10 @@ class RuntimeProfile:
 
 @dataclass
 class ModelPack:
-    """A model folder: weights, drafter, drafter head, KV profile, tokenizer files (and ``yasaheni.json`` listing them)."""
+    """A model folder: weights, drafter, drafter head, KV profile, tokenizer files and the manifest that lists them.
+
+    The manifest is ``yasaheni.json`` in this fork; the official YASAKANI folders call it ``yasakani.json``.  Either is read,
+    with ``yasaheni.json`` taking precedence when both exist."""
     root: Path
     weights: Path
     draft: Path
@@ -112,7 +115,9 @@ class ModelPack:
     max_ctx: int = 262144
     model_id: str = "qwen3.8-27b"
     sha256: Dict[str, str] = field(default_factory=dict)
+    manifest: Optional[Path] = None
 
+    MANIFESTS = ("yasaheni.json", "yasakani.json")
     DEFAULT_FILES = dict(weights="qwen38_27b_e3x.yskn", draft="bdraft2_k8.yskn", draft_head="bdraft2_k8.shead", kv_profile="kvq_u5.bin")
 
     @classmethod
@@ -122,8 +127,8 @@ class ModelPack:
             raise YasakaniError("model folder not found: %s" % root)
         files = dict(cls.DEFAULT_FILES)
         meta = {}
-        mf = root / "yasaheni.json"
-        if mf.is_file():
+        mf = next((root / n for n in cls.MANIFESTS if (root / n).is_file()), None)
+        if mf is not None:
             meta = json.loads(mf.read_text(encoding="utf-8"))
             files.update(meta.get("files") or {})
         paths = {k: root / v for k, v in files.items() if k in cls.DEFAULT_FILES}
@@ -135,10 +140,10 @@ class ModelPack:
                 raise YasakaniError("model folder %s is missing %s" % (root, need))
         return cls(root=root, weights=paths["weights"], draft=paths["draft"], draft_head=paths["draft_head"],
                    kv_profile=paths["kv_profile"], max_ctx=int(meta.get("max_ctx", 262144)),
-                   model_id=str(meta.get("model_id", "qwen3.8-27b")), sha256=dict(meta.get("sha256") or {}))
+                   model_id=str(meta.get("model_id", "qwen3.8-27b")), sha256=dict(meta.get("sha256") or {}), manifest=mf)
 
     def verify(self, progress=None) -> Dict[str, bool]:
-        """Compare the sha256 of every listed file with ``yasaheni.json`` (reads ~15 GB: a minute or two)."""
+        """Compare the sha256 of every listed file with the manifest that was read (reads ~15 GB: a minute or two)."""
         res = {}
         for name, want in sorted(self.sha256.items()):
             p = self.root / name

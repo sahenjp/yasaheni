@@ -41,12 +41,19 @@ def tokenizer_dir():
     return None
 
 
-def make_pack(tmp: Path, name: str = "ok") -> ModelPack:
+PLACEHOLDER_FILES = ("qwen38_27b_e3x.yskn", "bdraft2_k8.yskn", "bdraft2_k8.shead", "kvq_u5.bin", "tokenizer.json", "tokenizer_config.json")
+
+
+def make_folder(tmp: Path, name: str = "ok", files=PLACEHOLDER_FILES) -> Path:
     root = tmp / name
     root.mkdir(parents=True, exist_ok=True)
-    for f in ("qwen38_27b_e3x.yskn", "bdraft2_k8.yskn", "bdraft2_k8.shead", "kvq_u5.bin", "tokenizer.json", "tokenizer_config.json"):
+    for f in files:
         (root / f).write_bytes(b"x")
-    return ModelPack.load(root)
+    return root
+
+
+def make_pack(tmp: Path, name: str = "ok") -> ModelPack:
+    return ModelPack.load(make_folder(tmp, name))
 
 
 class Stub:

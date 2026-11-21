@@ -204,7 +204,13 @@ def cmd_info(args) -> int:
             print("model    %s  (id %s, context up to %d tokens)" % (pack.root.name, pack.model_id, pack.max_ctx))
             for label, p in (("weights", pack.weights), ("draft", pack.draft), ("draft head", pack.draft_head), ("kv profile", pack.kv_profile)):
                 print("  %-10s %-26s %s" % (label, p.name, _human(p.stat().st_size)))
-            print("  checksums  %s" % ("%d files listed in yasaheni.json" % len(pack.sha256) if pack.sha256 else "none listed (yasaheni.json missing)"))
+            if pack.sha256:
+                assert pack.manifest is not None
+                print("  checksums  %d files listed in %s" % (len(pack.sha256), pack.manifest.name))
+            elif pack.manifest is not None:
+                print("  checksums  none listed (%s has no \"sha256\")" % pack.manifest.name)
+            else:
+                print("  checksums  none listed (no %s)" % " or ".join(ModelPack.MANIFESTS))
             from .textio import ChatFormatter
             ChatFormatter(pack.root)
             print("  tokenizer  ok (chat template found)")
@@ -220,9 +226,13 @@ def cmd_info(args) -> int:
 def cmd_verify(args) -> int:
     pack = ModelPack.load(_model_dir(args))
     if not pack.sha256:
-        print("no checksums are listed for this folder (yasaheni.json missing or without \"sha256\").")
+        if pack.manifest is not None:
+            print("no checksums are listed for this folder (%s has no \"sha256\")." % pack.manifest.name)
+        else:
+            print("no checksums are listed for this folder (no %s)." % " or ".join(ModelPack.MANIFESTS))
         return 2
-    print("checking %d files (reads about %s, one to two minutes) ..." % (len(pack.sha256), _human(sum((pack.root / n).stat().st_size for n in pack.sha256 if (pack.root / n).is_file()))))
+    print("checking %d files listed in %s (reads about %s, one to two minutes) ..." % (len(pack.sha256), pack.manifest.name,
+          _human(sum((pack.root / n).stat().st_size for n in pack.sha256 if (pack.root / n).is_file()))))
     res = pack.verify(progress=lambda n, ok: print("  %-30s %s" % (n, "OK" if ok else "DIFFERENT"), flush=True))
     bad = [n for n, ok in res.items() if not ok]
     print("all files match." if not bad else "%d file(s) differ: %s  (download them again)" % (len(bad), ", ".join(bad)))
@@ -537,7 +547,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dll")
     sp.set_defaults(func=cmd_info)
 
-    sp = sub.add_parser("verify", help="check the model files against the checksums listed in yasaheni.json")
+    sp = sub.add_parser("verify", help="check the model files against the checksums listed in " + " or ".join(ModelPack.MANIFESTS))
     sp.add_argument("--model-dir")
     sp.set_defaults(func=cmd_verify)
 

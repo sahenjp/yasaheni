@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import urllib.request
@@ -212,6 +213,43 @@ class CliTests(unittest.TestCase):
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
+
+
+class ManifestMessageTests(unittest.TestCase):
+    """The info and verify messages name the manifest that was actually read (no tokenizer needed)."""
+
+    def _run(self, root):
+        info = run_cli("info", "--dll", "/nonexistent/yskn.dll", "--model-dir", str(root))
+        verify = run_cli("verify", "--model-dir", str(root))
+        return info, verify
+
+    def test_yasakani_manifest_is_named(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = support.make_folder(Path(t))
+            want = hashlib.sha256((root / "kvq_u5.bin").read_bytes()).hexdigest()
+            (root / "yasakani.json").write_text(json.dumps({"sha256": {"kvq_u5.bin": want}}), encoding="utf-8")
+            info, verify = self._run(root)
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+        self.assertIn("checking 1 files listed in yasakani.json", verify.stdout)
+        self.assertIn("all files match", verify.stdout)
+        self.assertIn("checksums  1 files listed in yasakani.json", info.stdout)
+
+    def test_empty_sha256_names_the_manifest(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = support.make_folder(Path(t))
+            (root / "yasakani.json").write_text(json.dumps({"files": {}}), encoding="utf-8")
+            info, verify = self._run(root)
+        self.assertEqual(verify.returncode, 2)
+        self.assertIn("yasakani.json has no \"sha256\"", verify.stdout)
+        self.assertIn("checksums  none listed (yasakani.json has no \"sha256\")", info.stdout)
+
+    def test_no_manifest_names_both(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = support.make_folder(Path(t))
+            info, verify = self._run(root)
+        self.assertEqual(verify.returncode, 2)
+        self.assertIn("no yasaheni.json or yasakani.json", verify.stdout)
+        self.assertIn("checksums  none listed (no yasaheni.json or yasakani.json)", info.stdout)
 
 
 if __name__ == "__main__":
