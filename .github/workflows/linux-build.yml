@@ -49,7 +49,7 @@ jobs:
       - name: Check the exported symbols
         run: |
           set -euo pipefail
-          so=build-linux/libyskn.so
+          so=build-linux/bin/libyskn.so
           test -f "$so" || { echo "::error::$so was not produced"; exit 1; }
           ls -l "$so"
           nm -D --defined-only "$so" > symbols.txt

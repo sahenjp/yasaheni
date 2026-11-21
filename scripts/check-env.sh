@@ -79,7 +79,7 @@ fi
 
 section "engine library"
 found=""
-for p in "${YASAKANI_DLL:-}" "$(dirname "${BASH_SOURCE[0]}")/../build-linux/libyskn.so" /usr/local/lib/libyskn.so; do
+for p in "${YASAKANI_DLL:-}" "$(dirname "${BASH_SOURCE[0]}")/../build-linux/bin/libyskn.so" "$(dirname "${BASH_SOURCE[0]}")/../build-linux/libyskn.so" /usr/local/lib/libyskn.so; do
     [[ -n "$p" && -f "$p" ]] && { found="$p"; break; }
 done
 if [[ -n "$found" ]]; then

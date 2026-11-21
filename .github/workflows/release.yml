@@ -40,7 +40,7 @@ jobs:
           set -euo pipefail
           pkg="yasaheni-${GITHUB_REF_NAME}-linux-x86_64"
           mkdir -p "dist/$pkg"
-          cp build-linux/libyskn.so "dist/$pkg/"
+          cp build-linux/bin/libyskn.so "dist/$pkg/"
           cp include/yskn_abi.h "dist/$pkg/"
           cp -r python quickstart "dist/$pkg/"
           cp README.md BUILDING.md LICENSE NOTICE "dist/$pkg/"

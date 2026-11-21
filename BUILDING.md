@@ -33,7 +33,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYSKN_CUDA_ARCH="80;86;
 cmake --build build -j
 ```
 
-`-DYSKN_CUDA_ARCH` also accepts `native` and `portable` (`120;90;86;80;75`). Without it, `-DCMAKE_CUDA_ARCHITECTURES` is used, defaulting to `120`.
+`-DYSKN_CUDA_ARCH` also accepts `native` and `portable` (`120;90;86;80`). Without it, `-DCMAKE_CUDA_ARCHITECTURES` is used, defaulting to `120`.
 
 ## Windows
 
@@ -66,8 +66,8 @@ Both are behind `__CUDA_ARCH__` guards in `src/pdl.cuh`, and `pdl_enabled()` che
 ## Verifying a build
 
 ```bash
-nm -D --defined-only build/libyskn.so | grep yskn_open   # the C ABI is exported
-cuobjdump --list-elf build/libyskn.so | grep -o 'sm_[0-9]*' | sort -u   # which architectures are inside
+nm -D --defined-only build/bin/libyskn.so | grep yskn_open   # the C ABI is exported
+cuobjdump --list-elf build/bin/libyskn.so | grep -o 'sm_[0-9]*' | sort -u   # which architectures are inside
 cd tests/gguf && cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build
 ```
 

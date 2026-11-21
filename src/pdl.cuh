@@ -5,7 +5,7 @@
 // Programmatic Dependent Launch (PDL) is a Hopper (sm_90) and later feature: the PTX
 // instructions griddepcontrol.wait / griddepcontrol.launch_dependents do not exist on
 // older targets. Everything here degrades to an ordinary launch on those targets, so the
-// same source builds for sm_75 .. sm_120.
+// same source builds for sm_80 .. sm_120.
 #include <cuda_runtime.h>
 #include <utility>
 namespace yskn {

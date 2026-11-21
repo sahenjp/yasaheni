@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 the YASAKANI authors
 #
-# Build the YASAKANI engine library (libyskn.so) on Linux.
+# Build the YASAKANI engine library on Linux; CMake writes it to <build>/bin/libyskn.so.
 #
 #   scripts/build-linux.sh                 # default architectures 120;86;80
 #   CUDA_ARCH="120;90;86;80" scripts/build-linux.sh
@@ -74,8 +74,9 @@ printf 'compiling %s\n' "${effective:-unknown}"
 cmake --build "$build_dir" --parallel "$jobs"
 
 # ---- report ----------------------------------------------------------------------------------------------------------
-so="$build_dir/libyskn.so"
-[[ -f "$so" ]] || die "the build finished but $so is missing."
+so="$build_dir/bin/libyskn.so"
+[[ -f "$so" ]] || so="$build_dir/libyskn.so"
+[[ -f "$so" ]] || die "the build finished but neither $build_dir/bin/libyskn.so nor $build_dir/libyskn.so is present."
 size="$(stat -c %s "$so" 2>/dev/null || stat -f %z "$so")"
 printf '\nbuilt %s\n' "$so"
 printf 'size  %s bytes (%s MiB)\n' "$size" "$((size / 1024 / 1024))"

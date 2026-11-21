@@ -28,7 +28,7 @@ CUDA_ARCH="80;86;89;90;120" scripts/build-linux.sh
 CUDA_ARCH=native scripts/build-linux.sh
 ```
 
-The result is `build-linux/libyskn.so`. The CUDA runtime is linked statically, so the library needs only the NVIDIA driver at run time.
+The result is `build-linux/bin/libyskn.so`. The CUDA runtime is linked statically, so the library needs only the NVIDIA driver at run time.
 
 ### Why the architectures matter
 
