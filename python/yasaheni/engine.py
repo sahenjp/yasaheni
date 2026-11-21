@@ -301,6 +301,10 @@ class Engine:
                 raise failure
         if "exc" in box:
             raise box["exc"]                                       # type: ignore[misc]
+        # rc -2: cancelled between prefill chunks.  No token was produced; the prompt state ends at the last committed chunk.
+        if box.get("rc") == -2:
+            return GenResult(ids=[], finish="cancelled", prompt_tokens=len(prompt_arr), cached_tokens=0, snap_mode=0, passes=0,
+                             prefill_ms=float(tm[0]), gen_ms=float(tm[1]))
         if box.get("rc") != 0:
             raise YasakaniError(str(box.get("err") or "engine call failed"))
         produced = int(st[STAT_INDEX["produced"]])

@@ -350,7 +350,7 @@ class ChatRunner:
                 emit(kind, item)
             usage.tool_calls = toolf.calls
         usage.completion_tokens = n_out + (usage.loop_guard or {}).get("extra_tokens", 0)
-        usage.finish = "stop" if finish == "stop" else "length"
+        usage.finish = finish if finish in ("stop", "cancelled") else "length"
         if usage.tool_calls and usage.finish == "stop":
             usage.finish = "tool_calls"
         return usage

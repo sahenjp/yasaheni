@@ -19,6 +19,14 @@ static bool select_device(int device) {
   return false;
 }
 #define YSKN_TRY(body) try { body; return 0; } catch (const std::exception& ex) { g_err = ex.what(); return -1; }
+
+// Binds the engine's cancel flag to Engine35 for the duration of one call, so prefill can poll it between chunks.  A cancel
+// that lands during prefill returns -2 (the caller's cancel path); everything else keeps the usual -1.
+struct Engine35CancelBind {
+  yskn::Engine35* q;
+  Engine35CancelBind(yskn::Engine35* q_, std::atomic<int>* cancel) : q(q_) { if (q) q->set_cancel(cancel); }
+  ~Engine35CancelBind() { if (q) q->set_cancel(nullptr); }
+};
 // Route on the first four bytes. "YSKN" keeps the original path untouched.
 //
 // "GGUF" is probed first, and the probe's answer decides:
@@ -92,6 +100,7 @@ extern "C" int yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_p
   try {
     if (n_cfg < 12) throw std::runtime_error("spec_generate: need at least 12 config values");
     e->cancel.store(0);                                   
+    Engine35CancelBind cancel_bind(e->q, &e->cancel);
     yskn::SpecxConfig c; c.cancel = &e->cancel; c.gamma = cfg[0]; c.use_d0 = cfg[1]; c.use_d1 = cfg[2]; c.d0_nmin = cfg[3]; c.d0_nmax = cfg[4]; c.d0_priority_n = cfg[5];
     c.extend = cfg[6]; c.d1_rejected = cfg[7]; c.auto_gamma = cfg[8]; c.use_graph = cfg[9]; c.use_d3 = cfg[10]; c.d3_steps = cfg[11];
     if (n_cfg > 12) c.d1_bigram = cfg[12]; if (n_cfg > 13) c.d1_static = cfg[13]; if (n_cfg > 14) c.d3_extend = cfg[14]; if (n_cfg > 15) c.d3_lazy = cfg[15]; if (n_cfg > 16) c.d3_gate = cfg[16];
@@ -125,7 +134,8 @@ extern "C" int yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_p
                 if (c.snap) { const auto& s = y.seq(); e->q->snap_note(s.data(), (int)s.size() - 1); } }   
     else { yskn::Specx y(*e->e, c, e->e->vocab()); run(y); }
     return 0;
-  } catch (const std::exception& ex) { g_err = ex.what(); return -1; }
+  } catch (const yskn::PrefillCancelled&) { g_err = "cancelled"; return -2; }
+  catch (const std::exception& ex) { g_err = ex.what(); return -1; }
 }
 
 

@@ -30,6 +30,7 @@ static int g_calls = 0;
 static int g_last_n_prompt = 0;
 static int32_t g_last_cfg[44];
 static int g_last_n_cfg = 0;
+static int g_rc = 0;                                       /* test-only: make spec_generate return this before writing anything */
 
 static void set_err(const char *m) { strncpy(g_err, m, sizeof g_err - 1); g_err[sizeof g_err - 1] = 0; }
 static void sleep_us(int us) { if (us > 0) { struct timespec t = { us / 1000000, (us % 1000000) * 1000L }; nanosleep(&t, 0); } }
@@ -41,6 +42,7 @@ EXPORT void stub_push_script(const int32_t *ids, int n, int loop_from) {
     pthread_mutex_unlock(&g_mu);
 }
 EXPORT void stub_set_delay_us(int us) { g_delay_us = us; }
+EXPORT void stub_set_rc(int rc) { g_rc = rc; }
 EXPORT int stub_get_opt(yskn_engine *e, int key) { return e->opts[key & 63]; }
 EXPORT int stub_calls(void) { return g_calls; }
 EXPORT int stub_last_n_prompt(void) { return g_last_n_prompt; }
@@ -82,6 +84,7 @@ EXPORT int yskn_spec_generate(yskn_engine *e, const int32_t *prompt, int n_promp
     g_err[0] = 0;
     atomic_store(&e->cancel, 0);
     g_calls++; g_last_n_prompt = n_prompt;
+    if (g_rc) return g_rc;                                /* -2 (prefill cancelled) leaves out, stats and times untouched */
     if (n_cfg != 41 && n_cfg != 44) { set_err("spec_generate: bad config length"); return 1; }
     memset(g_last_cfg, 0, sizeof g_last_cfg); memcpy(g_last_cfg, cfg, sizeof(int32_t) * n_cfg); g_last_n_cfg = n_cfg;
     if (n_prompt < 1 || n_prompt + n_gen + 1 > e->max_ctx) { set_err("spec_generate: context overflow"); return 1; }

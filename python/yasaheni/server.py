@@ -5,7 +5,8 @@
 * Listens on 127.0.0.1 by default.  The ``Host`` header must name the address the server is bound to, and a request that carries an
   ``Origin`` must come from that same address (so a web page open in your browser cannot talk to the server).  To serve other
   machines use ``--host 0.0.0.0 --api-key KEY``.
-* One request is generated at a time; the others wait.
+* One request is generated at a time; the others wait, and a request that cannot get the engine within
+  YSKN_GEN_LOCK_S seconds (default 120) is answered with 429.
 * A stream carries one chunk per token (several chunks arrive together, about 64 times a second on Windows).
 * Tool calling: ``tools`` (functions) with ``tool_choice`` "auto" or "none".  The model's own chat template describes the tools to
   the model; the calls it writes come back as ``tool_calls`` (in a stream: one chunk per finished call, with the whole arguments).
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import os
 import socket
 import sys
@@ -34,11 +36,12 @@ from .chat import (REASONING_EFFORT_ALIASES, ChatParams, ChatRunner, RequestErro
 
 MAX_BODY = 32 * 1024 * 1024
 LOOPBACK = ("127.0.0.1", "localhost", "[::1]")
+_GEN_LOCK_MAX_S = 9.0e9                              # threading.Lock.acquire rejects a timeout at about 9.22e9 seconds
 
 
 class ServerConfig:
     def __init__(self, host="127.0.0.1", port=8765, api_key=None, model_id="qwen3.8-27b", default_max_tokens=32768,
-                 max_tokens_cap=None, default_thinking_budget=None):
+                 max_tokens_cap=None, default_thinking_budget=None, gen_lock_s=None):
         self.host, self.port, self.api_key, self.model_id = host, int(port), api_key, model_id
         self.default_max_tokens, self.max_tokens_cap = int(default_max_tokens), max_tokens_cap
         if default_thinking_budget is None:               # no command-line option yet: the starter of the harness sets the variable
@@ -47,6 +50,14 @@ class ServerConfig:
             except ValueError:
                 default_thinking_budget = 0
         self.default_thinking_budget = max(0, int(default_thinking_budget))
+        if gen_lock_s is None:                            # how long a request may wait for the engine before it gets 429
+            try:
+                gen_lock_s = float(os.environ.get("YSKN_GEN_LOCK_S") or 120.0)
+            except ValueError:
+                gen_lock_s = 120.0
+        gen_lock_s = float(gen_lock_s)
+        self.gen_lock_s = (120.0 if not math.isfinite(gen_lock_s) or gen_lock_s > _GEN_LOCK_MAX_S
+                           else max(0.0, gen_lock_s))
 
 
 class ApiState:
@@ -295,7 +306,10 @@ def make_handler(state: ApiState):
             # One request at a time.  With image input, prepare_checked also reads and encodes the images on the CPU, inside this
             # lock: while an image is encoded (about 15 s at the default limit of 1,024 image tokens on a 16-core CPU) no other
             # request is served and nothing is sent to this client yet.  Moving the encode out of the lock is a later change.
-            with state.gen_lock:
+            # A request that cannot get the lock within gen_lock_s is refused before any generation starts.
+            if not state.gen_lock.acquire(timeout=cfg.gen_lock_s):
+                return self._error(429, "another generation is in progress", "rate_limit_error")
+            try:
                 try:
                     prepared = runner.prepare_checked(params)        # before any header: a request that cannot be served gets a plain 400
                 except RequestError as ex:
@@ -353,6 +367,8 @@ def make_handler(state: ApiState):
                             self._error(code, msg, "server_error" if code == 500 else "invalid_request_error")
                     except Exception:                            # noqa: BLE001
                         self.close_connection = True
+            finally:
+                state.gen_lock.release()
 
     return Handler
 

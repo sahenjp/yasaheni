@@ -23,9 +23,11 @@ class EngineTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.stub.delay_us(0)
+        self.stub.set_rc(0)
         self.e = support.open_engine(Path(self.tmp.name), self.stub)
 
     def tearDown(self):
+        self.stub.set_rc(0)
         self.e.close()
         self.tmp.cleanup()
 
@@ -70,6 +72,14 @@ class EngineTests(unittest.TestCase):
         self.assertGreater(len(r.ids), 3)
         self.stub.push([31, 32, EOS])                           # the engine is usable afterwards
         self.assertEqual(self.e.generate([5, 6], 50).ids, [31, 32, EOS])
+
+    def test_cancelled_between_prefill_chunks(self):
+        self.stub.set_rc(-2)                                    # the engine never wrote a token or a measurement
+        r = self.e.generate([5, 6], 10)
+        self.assertEqual(r.ids, [])
+        self.assertEqual(r.finish, "cancelled")
+        self.assertEqual((r.cached_tokens, r.snap_mode, r.passes), (0, 0, 0))
+        self.assertEqual((r.prefill_ms, r.gen_ms), (0.0, 0.0))
 
     def test_consumer_error_stops_engine_and_is_raised(self):
         self.stub.push([100, 101, 102, 103], loop_from=0)

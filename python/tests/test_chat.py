@@ -2,11 +2,13 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
 from tests import support
 from yasaheni import loopguard
+from yasaheni import chat as chat_module
 from yasaheni.chat import ChatParams, ChatRunner, RequestError, StopFilter, clean_messages
 from yasaheni.runtime import EOS_IDS
 from yasaheni.textio import ChatFormatter
@@ -47,6 +49,55 @@ class CleanMessageTests(unittest.TestCase):
                     [{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}]):
             with self.assertRaises(RequestError):
                 clean_messages(bad)
+
+
+class _FakeFormatter:
+    """Enough of ChatFormatter for a request that ends before any token is produced."""
+
+    think_end = 7
+    digit_ids = np.asarray([], np.int32)
+
+    def encode(self, text):
+        return np.full(max(1, len(text)), self.think_end, np.int32)
+
+    def prompt(self, messages, **template_kwargs):
+        return np.asarray([1, 2, 3], np.int32), False
+
+
+class _NullStream:
+    def __init__(self, *args, **kwargs):
+        self.think_end_at = None
+        self.in_reasoning = False
+
+    def feed(self, ids, final=False):
+        return []
+
+
+class ChatRunnerCancelTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.stub = support.Stub()
+        self.stub.delay_us(0)
+        self.stub.set_rc(-2)                                    # cancelled between prefill chunks, no ids
+        self.engine = support.open_engine(Path(self.tmp.name), self.stub)
+        self.runner = ChatRunner(self.engine, _FakeFormatter(), seed0=100)
+
+    def tearDown(self):
+        self.stub.set_rc(0)
+        self.engine.close()
+        self.tmp.cleanup()
+
+    def test_cancelled_finish_is_not_reported_as_length(self):
+        events = []
+        with mock.patch.object(chat_module, "OutputStream", _NullStream):
+            u = self.runner.run(ChatParams(messages=[{"role": "user", "content": "hi"}],
+                                           template_kwargs={"enable_thinking": False}),
+                                lambda kind, text: events.append((kind, text)))
+        self.assertEqual(events, [])
+        self.assertEqual(u.completion_tokens, 0)
+        self.assertEqual(u.finish, "cancelled")
+        self.assertNotEqual(u.finish, "length")
+        self.assertEqual((u.prefill_ms, u.gen_ms), (0.0, 0.0))
 
 
 @unittest.skipUnless(HAVE_TOK, "set YASAKANI_TEST_MODEL_DIR to a folder with the Qwen3.8 tokenizer files")

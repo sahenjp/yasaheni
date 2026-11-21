@@ -1114,6 +1114,7 @@ int Engine35::prefill_vsp(const int32_t* ids, int n) {
     const int nsc = std::min(SC, n - r0), nsub = (nsc + PM_ - 1) / PM_;
     const int per = std::min(PM_, ((nsc + nsub - 1) / nsub + 63) / 64 * 64);   
     cudaStreamSynchronize(st_);                                          
+    prefill_cancel_check();                                              // after the previous super-chunk committed, before this one starts
     if (cudaMemcpy(tc_ids_, ids + r0, (size_t)nsc * 4, cudaMemcpyHostToDevice) != cudaSuccess) throw std::runtime_error("prefill_vsp: id upload");
     const bool nb_go = ovl_ && nb_rows_ >= per && kskip_ == 0 && per > 64 && nsub >= 2 && pmix_big_;
     auto cap_rows = [&](int l, int s0, int m) {
@@ -1206,6 +1207,7 @@ void Engine35::nll_layer(const int32_t* ids, int n, float* out) {
 int Engine35::prefill_chunks(const int32_t* ids, int n) {
   if (n < 1 || pos_ + n > max_ctx_) throw std::runtime_error("prefill: context overflow");
   for (int done = 0; done < n;) {
+    prefill_cancel_check();                                              // between chunks only: never inside a kernel
     const int M = std::min(PM_, n - done); const bool last = done + M == n;
     upload_rows(ids + done, M, nullptr);
     run_pass(M, true, last ? HEAD_LAST : HEAD_NONE, false, false, true);
@@ -1252,6 +1254,7 @@ int Engine35::prefill_rows(const int32_t* ids, int n, int32_t* out_argmax, int32
   if (n < 1 || pos_ + n > max_ctx_) throw std::runtime_error("prefill_rows: context overflow");
   int next = 0;
   for (int done = 0; done < n;) {
+    prefill_cancel_check();                                              // between chunks only: never inside a kernel
     const int M = std::min(PM_, n - done);
     upload_rows(ids + done, M, nullptr);
     run_pass(M, true, HEAD_ALL, true, false, true);
